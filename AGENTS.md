@@ -79,6 +79,7 @@ Each phase ends with a tagged commit. Each milestone is roughly one PR.
 - [x] **B4a** USB I/O moved to a Web Worker (verified — rate approaches 2.40 MS/s).
 - [x] **B4b** SAB ring buffer between USB + DSP workers; RustFFT (2048-bin, Hann window) via WASM in DSP worker; spectrum + waterfall Canvas 2D renderers; viridis/magma/classic colormaps; adjustable dB range. Target 30 fps at 2048-bin FFT (PRD M1.2, M1.4).
 - [x] **B5** Tuning UI: keyboard hotkeys (`F`/`M`/`B`/`G`/`,`/`.`/`[`/`]`/`Space`/`?`); virtual VFO dial (click-drag horizontally to fine-tune, scroll-wheel to step); click anywhere on spectrum/waterfall to tune to that frequency; live frequency-axis labels above the waterfall. Live retune-while-streaming via worker `retune` message. (PRD M1.5, M1.6)
+- [x] **B6a** Audio pipeline + WFM mono demod: Rust `WfmDemod` (2.4 MS/s → 240 kS/s IF decimation → FM discriminator → 48 kS/s audio decimation, all with windowed-sinc FIRs); SAB-backed PCM ring; AudioWorklet (`web/public/audio-processor.js`); AudioContext at 48 kHz; volume slider + mute toggle (Space). NFM/AM/SSB/CW are mode-cycle UI only — actual demod for those lands in B6b–B6d. (PRD M1.3 partial)
 - [ ] **B6** Demods: WFM (mono+stereo), NFM, AM, SSB (USB/LSB via Weaver) (PRD M1.3)
 - [ ] **B7** URL hash state + memory channels + IARU band overlay + S-meter (PRD M1.7–M1.10)
 - [ ] **B8** First-run onboarding with per-OS WebUSB setup links (PRD M1.11)
@@ -147,9 +148,9 @@ These are non-negotiable. Violating any of them is a stop-the-line event.
 - B1a: cleanup + project identity (LICENSE, README, .gitignore, etc.)
 - B1c: scaffold `web/` (Svelte 5 + Vite + Tailwind 4 + lucide-svelte), `dsp/` (Cargo crate stub with `smoke()` export), `bridge/` (Go module + stub main.go)
 - B1d: four GitHub Actions workflows (ci, deploy, bridge-release, claude-review) + GoReleaser config
-**Currently working on:** B5 shipped. Ready for B6 (demodulation).
+**Currently working on:** B6a shipped (WFM mono demod + audio pipeline). Ready for B6b (NFM + AM demods).
 **Blocked by:** None.
-**B5 hardware verification pending:** keyboard hotkeys (`?` for reference), drag the VFO dial, click anywhere on the spectrum/waterfall to retune, scroll-wheel to fine-tune. All should retune the dongle without restarting the stream.
+**B6a hardware verification pending:** tune to a strong local FM broadcast station (e.g. ~100 MHz), unmute if needed, you should hear it. Volume slider should respond. Press Space to mute.
 
 ## Agent behavior baseline
 

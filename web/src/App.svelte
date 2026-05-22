@@ -9,6 +9,8 @@
     Square,
     Unplug,
     Keyboard,
+    Volume2,
+    VolumeX,
   } from 'lucide-svelte';
   import { onMount, onDestroy } from 'svelte';
   import init, { smoke } from './lib/dsp/wasm/moshon_dsp.js';
@@ -24,6 +26,7 @@
   import FrequencyEntry from './lib/ui/FrequencyEntry.svelte';
   import VfoDial from './lib/ui/VfoDial.svelte';
   import SpectrumWaterfall from './lib/ui/SpectrumWaterfall.svelte';
+  import { AudioPipeline } from './lib/audio/audio-pipeline';
 
   // ---- WASM smoke (B1) ----
   type WasmStatus = 'pending' | 'ready' | 'error';
@@ -37,6 +40,8 @@
   const FFT_RATE_HZ = 30;
 
   const source = new RtlSdrSource();
+  const audio = new AudioPipeline();
+  let volume = $state(0.6);
 
   let rtlStatus = $state<RtlSdrStatus>('idle');
   let rtlError = $state<string | null>(null);
@@ -76,6 +81,15 @@
     unsubStats?.();
     unsubFft?.();
     void source.disconnect();
+    void audio.close();
+  });
+
+  // Push volume / mute into the audio worklet whenever they change.
+  $effect(() => {
+    if (audio.isReady) audio.setVolume(volume);
+  });
+  $effect(() => {
+    if (audio.isReady) audio.setMuted(tuning.muted);
   });
 
   // ---- Retune effects ----
@@ -136,6 +150,12 @@
     rafHandle = requestAnimationFrame(tick);
 
     try {
+      // AudioContext can only be created from a user gesture, so do it here
+      // (inside the Start click handler). Idempotent if already up.
+      await audio.init();
+      audio.setVolume(volume);
+      audio.setMuted(tuning.muted);
+
       rtlStatus = 'streaming';
       await source.start({
         sampleRate: SAMPLE_RATE,
@@ -143,6 +163,7 @@
         gain: tuning.gain,
         fftSize: FFT_SIZE,
         fftRateHz: FFT_RATE_HZ,
+        audioRing: audio.ring!.buffer,
       });
     } catch (err) {
       rtlStatus = 'error';
@@ -399,6 +420,43 @@
           stepSize={tuning.stepSize}
           onTune={onClickToTune}
         />
+      </div>
+
+      <!-- Audio: volume slider + mute -->
+      <div class="flex items-center gap-3 mb-4 text-xs font-mono">
+        <button
+          type="button"
+          onclick={() => tuning.toggleMute()}
+          class="inline-flex items-center gap-2 rounded border border-neutral-700 px-3 py-1.5 hover:border-neutral-500 cursor-pointer"
+          class:bg-amber-950={tuning.muted}
+          class:border-amber-700={tuning.muted}
+          class:text-amber-300={tuning.muted}
+          class:text-neutral-300={!tuning.muted}
+          aria-pressed={tuning.muted}
+          title="Mute (Space)"
+        >
+          {#if tuning.muted}
+            <VolumeX size={14} />
+            <span>Muted</span>
+          {:else}
+            <Volume2 size={14} />
+            <span>Audio</span>
+          {/if}
+        </button>
+        <label class="flex-1 flex items-center gap-3">
+          <span class="text-neutral-500 uppercase text-[10px]">Vol</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            bind:value={volume}
+            class="flex-1"
+          />
+          <span class="text-neutral-300 w-10 text-right tabular-nums">
+            {Math.round(volume * 100)}%
+          </span>
+        </label>
       </div>
 
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4 text-xs font-mono">

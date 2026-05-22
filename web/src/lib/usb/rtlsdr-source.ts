@@ -38,6 +38,11 @@ export type StreamOptions = {
   fftSize?: number;
   /** Target rate of FFT frames delivered to listeners (Hz). Default 30. */
   fftRateHz?: number;
+  /**
+   * SharedArrayBuffer the DSP worker writes 48 kHz mono f32 PCM into,
+   * to be consumed by an AudioWorklet on the main thread.
+   */
+  audioRing: SharedArrayBuffer;
 };
 
 export type StatsEvent = {
@@ -117,6 +122,7 @@ export class RtlSdrSource {
     this.dspWorker!.postMessage({
       kind: 'init',
       iqRing: this.ring.buffer,
+      audioRing: opts.audioRing,
       fftSize,
       postRateHz: fftRateHz,
     });
