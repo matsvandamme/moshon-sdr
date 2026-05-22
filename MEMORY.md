@@ -35,6 +35,28 @@ Long-running notes that should survive across sessions but don't belong in the f
 - NFM/AM/SSB/CW are mode-cycle UI only — actual demod lands in B6b–B6d.
 - Next milestone: **B6b** — NFM + AM demods (much simpler than WFM; single-stage envelope/quadrature demods on the existing channelizer chain).
 
+**As of M2.5 (HackRF One driver):**
+- M2.5 shipped: HackRF One support over WebUSB.
+- Protocol module in [web/src/lib/usb/hackrf-protocol.ts](web/src/lib/usb/hackrf-protocol.ts) — no external dep, libhackrf C reference translated to control-transfer helpers. Vendor request codes match the canonical `enum hackrf_vendor_request`.
+- USB IDs accepted: `1d50:6089` (HackRF One production), `1d50:604b` (Jellybean preprod), `1d50:cc15` (rad1o variant).
+- Sample rate fixed at 2.4 MS/s same as RTL-SDR path so the DSP chain is unchanged. HackRF's PLL handles arbitrary rates; we set divider=1 in `SAMPLE_RATE_SET` for exact rate.
+- Baseband filter pinned to 1.75 MHz (closest valid value ≥ 0.75 × 2.4 MHz).
+- Gain mapping: single user-facing 0..~75 dB → AMP (14 dB flat), LNA (0..40 in 8 dB steps), VGA (0..62 in 2 dB steps). Greedy split: AMP on at userDb ≥ 50, then fill LNA first (lower NF), then VGA. See `distributeGain()` in the protocol module.
+- I/Q format: HackRF emits signed int8 IQ. The worker repacks `s + 128` → offset-binary u8 in a 32 KB scratch buffer before writing to the SAB ring, so the existing u8-based DSP chain consumes either dongle identically.
+- TypeScript gotcha (same as B9): `Uint8Array.subarray()` returns `Uint8Array<ArrayBufferLike>` which is incompatible with WebUSB's `BufferSource` parameter. Fix: have helpers return `ArrayBuffer` directly instead of `Uint8Array`.
+
+**RDS testing status (2026-05-23):**
+- On-air test against **Studio Brussel 102.1 MHz, Belgium**: lock light flickers but **PS/PI/RT stay empty**.
+- Diagnosed three bugs and shipped fixes in commit `048c04b`:
+  1. Biphase phase never auto-flipped (50% of the time we're on the wrong phase → mathematically can't lock).
+  2. Single offset match was accepted as sync → ~0.5%/bit false-positive rate gave the flicker effect.
+  3. Post-sync miss path silently advanced `expected_offset_idx` and filled `blocks[]` with garbage even when sync was wrong.
+- **NOT YET RE-VERIFIED ON HARDWARE.** Belgian PI for Studio Brussel is typically `0x6205` per RDS PI tables. When the test resumes, expect 3-5 seconds to lock and `PS = "STUDIO  "` or `"STUBRU  "` (varies by station's broadcast).
+- Possible remaining issues if it still doesn't lock cleanly:
+  - Symbol clock free-runs (no Gardner timing). At 2375 half-baud / 240 kHz IF, drift is < 0.01% — should be fine over single-block durations but might matter over a few seconds.
+  - I-channel only (no Q for PLL). Strong signals fine; weak signals might benefit from a Costas loop.
+  - 57 kHz BPF Q=25 → bandwidth ≈ 2.3 kHz. RDS occupies ±2.4 kHz around 57 kHz, so the BPF clips the spectrum edges. Could open up to Q=15-20.
+
 **As of M2.1 (audio recording):**
 - M2.1 shipped: in-app WAV recorder.
 - DSP worker tap: when `setRecording(true)` is sent, the worker copies each demodulated audio batch (interleaved L,R f32, pre-volume / pre-mute) into a transferable buffer and posts it back to main alongside the SAB ring write. ~384 KB/s of postMessage traffic at 48 kHz stereo — fine.

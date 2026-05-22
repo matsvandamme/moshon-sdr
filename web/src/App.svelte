@@ -21,6 +21,7 @@
   import init, { smoke } from './lib/dsp/wasm/moshon_dsp.js';
   import { RtlSdrSource, type RtlSdrStatus } from './lib/usb/rtlsdr-source';
   import { RtlTcpSource } from './lib/usb/rtltcp-source';
+  import { HackRfSource } from './lib/usb/hackrf-source';
   import type { ColormapName } from './lib/visualizer/spectrum-waterfall';
   import {
     tuning,
@@ -51,18 +52,22 @@
   const FFT_SIZE = 2048;
   const FFT_RATE_HZ = 30;
 
-  // Two sources: WebUSB (local dongle) and rtl_tcp-over-WebSocket (remote
-  // bridge). Both expose the same listener interface; we switch which one
-  // we drive based on the inputMode toggle.
+  // Three sources: RTL-SDR via WebUSB, HackRF One via WebUSB, and
+  // rtl_tcp-over-WebSocket (remote bridge). They all expose the same
+  // listener surface, so the rest of App.svelte can poll activeSource()
+  // without caring which physical link is feeding it.
   const usbSource = new RtlSdrSource();
+  const hackrfSource = new HackRfSource();
   const netSource = new RtlTcpSource();
-  type InputMode = 'usb' | 'network';
+  type InputMode = 'usb' | 'hackrf' | 'network';
   let inputMode = $state<InputMode>('usb');
   let bridgeUrl = $state('http://127.0.0.1:9090');
   let rtlTcpTarget = $state('');
 
-  function activeSource(): RtlSdrSource | RtlTcpSource {
-    return inputMode === 'usb' ? usbSource : netSource;
+  function activeSource(): RtlSdrSource | HackRfSource | RtlTcpSource {
+    if (inputMode === 'hackrf') return hackrfSource;
+    if (inputMode === 'network') return netSource;
+    return usbSource;
   }
 
   const audio = new AudioPipeline();
@@ -121,7 +126,9 @@
       const savedTarget = localStorage.getItem('moshon.rtltcpTarget.v1');
       if (savedTarget !== null) rtlTcpTarget = savedTarget;
       const savedMode = localStorage.getItem('moshon.inputMode.v1');
-      if (savedMode === 'usb' || savedMode === 'network') inputMode = savedMode;
+      if (savedMode === 'usb' || savedMode === 'hackrf' || savedMode === 'network') {
+        inputMode = savedMode;
+      }
     } catch {
       // localStorage unavailable — skip onboarding entirely rather than
       // forcing it on every load.
@@ -178,6 +185,7 @@
     unsubStats?.();
     unsubFft?.();
     void usbSource.disconnect();
+    void hackrfSource.disconnect();
     void netSource.disconnect();
     void audio.close();
   });
@@ -326,11 +334,17 @@
   }
 
   async function onConnect() {
-    // USB path only — the WebUSB picker needs a user gesture.
+    // Local-USB path (RTL-SDR or HackRF). The WebUSB picker needs a user
+    // gesture, so each click reopens whichever device matches the
+    // current inputMode.
     rtlError = null;
     rtlStatus = 'connecting';
     try {
-      await usbSource.connect();
+      if (inputMode === 'hackrf') {
+        await hackrfSource.connect();
+      } else {
+        await usbSource.connect();
+      }
       rtlStatus = 'connected';
     } catch (err) {
       rtlStatus = 'error';
@@ -346,7 +360,7 @@
     try {
       await startAudio();
       rtlStatus = 'streaming';
-      await usbSource.start({
+      const opts = {
         sampleRate: SAMPLE_RATE,
         centerFreq: tuning.centerFreq,
         gain: tuning.gain,
@@ -355,7 +369,12 @@
         mode: tuning.mode,
         bandwidthHz: tuning.bandwidth,
         audioRing: audio.ring!.buffer,
-      });
+      };
+      if (inputMode === 'hackrf') {
+        await hackrfSource.start(opts);
+      } else {
+        await usbSource.start(opts);
+      }
     } catch (err) {
       rtlStatus = 'error';
       rtlError = err instanceof Error ? err.message : String(err);
@@ -572,7 +591,11 @@
   >
     <header class="flex items-center justify-between flex-wrap gap-2 mb-4">
       <h2 class="text-sm font-medium text-neutral-300 uppercase tracking-wide">
-        RTL-SDR · Spectrum &amp; Waterfall
+        {inputMode === 'hackrf'
+          ? 'HackRF'
+          : inputMode === 'network'
+            ? 'Network'
+            : 'RTL-SDR'} · Spectrum &amp; Waterfall
       </h2>
       <div class="flex items-center gap-2 flex-wrap">
         <button
@@ -598,8 +621,10 @@
     </header>
 
     {#if rtlStatus === 'idle'}
-      <!-- Input mode picker (USB dongle vs network bridge) -->
-      <div class="flex gap-1 mb-4 text-xs font-mono">
+      <!-- Input mode picker. RTL-SDR and HackRF are both WebUSB; the
+           network tab proxies a remote rtl_tcp via the moshon-bridge
+           daemon. -->
+      <div class="flex gap-1 mb-4 text-xs font-mono flex-wrap">
         <button
           type="button"
           onclick={() => (inputMode = 'usb')}
@@ -614,7 +639,23 @@
           aria-pressed={inputMode === 'usb'}
         >
           <Usb size={12} />
-          Local USB
+          RTL-SDR
+        </button>
+        <button
+          type="button"
+          onclick={() => (inputMode = 'hackrf')}
+          class="inline-flex items-center gap-1.5 rounded px-3 py-1.5 cursor-pointer"
+          class:bg-neutral-800={inputMode === 'hackrf'}
+          class:border-neutral-600={inputMode === 'hackrf'}
+          class:text-neutral-100={inputMode === 'hackrf'}
+          class:bg-neutral-950={inputMode !== 'hackrf'}
+          class:border-neutral-800={inputMode !== 'hackrf'}
+          class:text-neutral-400={inputMode !== 'hackrf'}
+          style="border-width: 1px; border-style: solid;"
+          aria-pressed={inputMode === 'hackrf'}
+        >
+          <Usb size={12} />
+          HackRF
         </button>
         <button
           type="button"
@@ -645,6 +686,20 @@
         >
           <Plug size={16} />
           Connect RTL-SDR
+        </button>
+      {:else if inputMode === 'hackrf'}
+        <p class="text-sm text-neutral-400 mb-4">
+          Plug in a HackRF One (or compatible). 1 MHz – 6 GHz tuning range,
+          wider passband than RTL-SDR. The first connection takes a moment
+          while we configure the device's filter and PLL.
+        </p>
+        <button
+          type="button"
+          onclick={onConnect}
+          class="inline-flex items-center gap-2 rounded-md bg-(--color-accent) text-neutral-950 px-4 py-2 text-sm font-medium hover:bg-(--color-accent-strong) cursor-pointer"
+        >
+          <Plug size={16} />
+          Connect HackRF
         </button>
       {:else}
         <NetworkConnect
