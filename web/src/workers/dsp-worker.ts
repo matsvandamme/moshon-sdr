@@ -26,7 +26,7 @@ import init, {
 import { SabRing } from '../lib/ring/sab-ring';
 import { CwDecoder } from '../lib/dsp/cw-decoder';
 
-export type DemodMode = 'wfm' | 'nfm' | 'am' | 'usb' | 'lsb' | 'cw' | 'adsb';
+export type DemodMode = 'wfm' | 'nfm' | 'am' | 'usb' | 'lsb' | 'cw' | 'adsb' | 'lora';
 
 type InboundInit = {
   kind: 'init';
@@ -140,8 +140,9 @@ function buildDemod(mode: DemodMode, bandwidthHz: number): Demod {
     case 'cw':
       return new CwDemod(bandwidthHz);
     case 'adsb':
-      // ADS-B doesn't use the audio demod path — the loop branches on
-      // mode === 'adsb' below. Return a sentinel that's never called.
+    case 'lora':
+      // Neither ADS-B nor LoRa uses the audio demod path — the loop
+      // branches above. Return a sentinel that's never called.
       return ADSB_NULL_DEMOD;
     default:
       return new WfmDemod();
@@ -270,6 +271,22 @@ async function processLoop() {
       running = false;
       postOut({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
       return;
+    }
+
+    // LoRa monitor: spectrum-only. We don't have a payload decoder yet
+    // (CSS demod is multi-week work scheduled for v3); the mode just
+    // keeps the FFT live at the tuned ISM frequency so the user can see
+    // chirp activity. Drain the backlog to avoid falling behind.
+    if (currentMode === 'lora') {
+      while (iqRing.available() >= demodScratch.length) {
+        iqRing.read(demodScratch);
+      }
+      const nowL = performance.now();
+      if (nowL - lastPostMs >= minPostIntervalMs) {
+        lastPostMs = nowL;
+        postOut({ kind: 'fft', bins, time: nowL }, [bins.buffer]);
+      }
+      continue;
     }
 
     // ADS-B branch: feed IQ to AdsbDemod, drain any frames, skip audio.

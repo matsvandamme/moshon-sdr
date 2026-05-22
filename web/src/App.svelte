@@ -38,6 +38,7 @@
   import Onboarding from './lib/ui/Onboarding.svelte';
   import NetworkConnect from './lib/ui/NetworkConnect.svelte';
   import AircraftPanel from './lib/ui/AircraftPanel.svelte';
+  import LoraPanel from './lib/ui/LoraPanel.svelte';
   import { AudioPipeline } from './lib/audio/audio-pipeline';
   import { recorder } from './lib/audio/recorder.svelte';
   import { aircraftTracker } from './lib/state/aircraft.svelte';
@@ -381,6 +382,15 @@
     // on the next entry. Stale entries hang around briefly if we don't.
     if (tuning.mode !== 'adsb') {
       aircraftTracker.clear();
+    }
+  });
+
+  // LoRa mode auto-tunes to EU868 ch0 (868.1 MHz). Other regions and
+  // channels can be reached by manual tuning — `,`/`.` step by 200 kHz
+  // which lands cleanly on ch1/ch2.
+  $effect(() => {
+    if (tuning.mode === 'lora' && tuning.centerFreq !== 868_100_000) {
+      tuning.centerFreq = 868_100_000;
     }
   });
 
@@ -837,6 +847,13 @@
       {#if tuning.mode === 'adsb' && rtlStatus === 'streaming'}
         <div class="mb-3">
           <AircraftPanel />
+        </div>
+      {/if}
+
+      <!-- LoRa monitor (M2.7) — spectrum-only at EU868. -->
+      {#if tuning.mode === 'lora' && rtlStatus === 'streaming'}
+        <div class="mb-3">
+          <LoraPanel channelDb={signalDb} />
         </div>
       {/if}
 
