@@ -26,7 +26,10 @@
   import FrequencyEntry from './lib/ui/FrequencyEntry.svelte';
   import VfoDial from './lib/ui/VfoDial.svelte';
   import SpectrumWaterfall from './lib/ui/SpectrumWaterfall.svelte';
+  import MemoryChannels from './lib/ui/MemoryChannels.svelte';
   import { AudioPipeline } from './lib/audio/audio-pipeline';
+  import { readHash, writeHash } from './lib/state/url-hash';
+  import { peakDbInChannel, dbToSUnit } from './lib/dsp/smeter';
 
   // ---- WASM smoke (B1) ----
   type WasmStatus = 'pending' | 'ready' | 'error';
@@ -72,6 +75,15 @@
   // ---- Lifecycle ----
 
   onMount(async () => {
+    // Restore tuning state from URL hash before anything else touches it.
+    // Order matters: mode setter overwrites bandwidth and stepSize, so
+    // apply mode first, then bandwidth, then frequency / gain.
+    const hashState = readHash();
+    if (hashState.mode) tuning.mode = hashState.mode;
+    if (hashState.bandwidth) tuning.bandwidth = hashState.bandwidth;
+    if (hashState.centerFreq) tuning.centerFreq = hashState.centerFreq;
+    if (hashState.gain !== undefined) tuning.gain = hashState.gain;
+
     try {
       await init();
       smokeResult = smoke();
@@ -80,6 +92,17 @@
       wasmStatus = 'error';
       wasmError = err instanceof Error ? err.message : String(err);
     }
+  });
+
+  // Mirror tuning into the URL hash so the page is shareable. Debounced via
+  // history.replaceState so dragging the dial doesn't trash the back stack.
+  $effect(() => {
+    writeHash({
+      centerFreq: tuning.centerFreq,
+      mode: tuning.mode,
+      bandwidth: tuning.bandwidth,
+      gain: tuning.gain,
+    });
   });
 
   onDestroy(() => {
@@ -331,6 +354,16 @@
     elapsedMs > 0 ? fftFramesRendered / (elapsedMs / 1000) : 0,
   );
 
+  // ---- S-meter (B7) ----
+  // Peak dBFS across the bins covering the channel bandwidth. Refreshes
+  // on every FFT frame via the latestBins reactive dep.
+  let signalDb = $derived(
+    latestBins
+      ? peakDbInChannel(latestBins, SAMPLE_RATE, tuning.bandwidth)
+      : Number.NEGATIVE_INFINITY,
+  );
+  let signalS = $derived(dbToSUnit(signalDb));
+
   function formatMSamples(n: number): string {
     if (n >= 1e6) return `${(n / 1e6).toFixed(2)} MS`;
     if (n >= 1e3) return `${(n / 1e3).toFixed(1)} kS`;
@@ -395,7 +428,7 @@
           <Keyboard size={12} />
           <span>?</span>
         </button>
-        <span class="font-mono text-xs text-neutral-500">B3 · B4 · B5 · B6</span>
+        <span class="font-mono text-xs text-neutral-500">B3 · B4 · B5 · B6 · B7</span>
       </div>
     </header>
 
@@ -444,7 +477,7 @@
         </dl>
       </div>
 
-      <div class="rounded-md overflow-hidden border border-neutral-800 mb-4 bg-black">
+      <div class="rounded-md overflow-hidden border border-neutral-800 mb-3 bg-black">
         <SpectrumWaterfall
           bins={latestBins}
           centerFreq={tuning.centerFreq}
@@ -456,6 +489,29 @@
           onTune={onClickToTune}
         />
       </div>
+
+      <!-- S-meter (B7) -->
+      {#if rtlStatus === 'streaming' && Number.isFinite(signalDb)}
+        <div
+          class="flex items-center gap-3 mb-4 rounded-md border border-neutral-800
+                 bg-neutral-900 px-3 py-2 font-mono text-xs"
+          aria-label="Signal strength"
+        >
+          <span class="text-neutral-500 uppercase">Signal</span>
+          <span class="text-(--color-accent) text-sm tabular-nums">
+            S{signalS.sNumber}{#if signalS.plus > 0}+{signalS.plus}{/if}
+          </span>
+          <span class="text-neutral-400 tabular-nums">
+            {signalDb.toFixed(1)} dBFS
+          </span>
+          <div class="flex-1 h-1.5 rounded bg-neutral-800 overflow-hidden">
+            <div
+              class="h-full bg-(--color-accent)"
+              style="width: {Math.max(0, Math.min(100, ((signalDb + 100) / 100) * 100))}%"
+            ></div>
+          </div>
+        </div>
+      {/if}
 
       <!-- Audio: volume slider + mute -->
       <div class="flex items-center gap-3 mb-4 text-xs font-mono">
@@ -526,6 +582,11 @@
             bind:value={dbMax}
           />
         </label>
+      </div>
+
+      <!-- Memory channels (B7) -->
+      <div class="mb-4">
+        <MemoryChannels />
       </div>
 
       {#if rtlStatus === 'streaming' || (rtlStatus === 'closing' && bytesWritten > 0)}
@@ -635,7 +696,7 @@
   </section>
 
   <p class="text-xs text-neutral-500 max-w-lg text-center">
-    Pre-alpha · B6 complete (all modes) · Press <kbd class="font-mono text-neutral-300">?</kbd> for shortcuts.
+    Pre-alpha · B7 complete · Press <kbd class="font-mono text-neutral-300">?</kbd> for shortcuts.
     <br />
     <a
       href="https://github.com/matsvandamme/moshon-sdr/blob/main/AGENTS.md"

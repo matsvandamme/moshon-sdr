@@ -5,6 +5,7 @@
     type ColormapName,
   } from '../visualizer/spectrum-waterfall';
   import { formatHz } from '../state/tuning.svelte';
+  import { bandsInWindow, type IaruBand } from '../data/iaru-bands';
 
   let {
     bins,
@@ -89,6 +90,28 @@
       hz: xFracToHz(pct),
     })),
   );
+
+  // ---- IARU band overlay ----
+  type VisibleBand = {
+    band: IaruBand;
+    leftPct: number;
+    widthPct: number;
+  };
+  let visibleBands = $derived<VisibleBand[]>(
+    bandsInWindow(centerFreq, sampleRate)
+      .map((band) => {
+        const lo = centerFreq - sampleRate / 2;
+        const hi = centerFreq + sampleRate / 2;
+        const leftPct = Math.max(0, (band.low - lo) / sampleRate);
+        const rightPct = Math.min(1, (band.high - lo) / sampleRate);
+        return {
+          band,
+          leftPct,
+          widthPct: Math.max(0, rightPct - leftPct),
+        };
+      })
+      .filter((b) => b.widthPct > 0.001),
+  );
 </script>
 
 <div class="relative">
@@ -104,6 +127,26 @@
     onclick={onCanvasClick}
     onwheel={onCanvasWheel}
   ></canvas>
+
+  <!-- IARU band overlay above the frequency axis -->
+  {#if visibleBands.length > 0}
+    <div
+      class="relative h-3 bg-neutral-950 border-t border-neutral-800 overflow-hidden"
+      aria-label="IARU bands overlay"
+    >
+      {#each visibleBands as v (v.band.label + v.band.low)}
+        <div
+          class="absolute top-0 bottom-0 bg-(--color-accent)/15 border-x border-(--color-accent)/40
+                 text-[9px] font-mono text-(--color-accent) px-1 leading-3 overflow-hidden
+                 whitespace-nowrap"
+          style="left: {v.leftPct * 100}%; width: {v.widthPct * 100}%;"
+          title="{v.band.label} — suggested {v.band.suggestedMode.toUpperCase()}"
+        >
+          {v.band.label}
+        </div>
+      {/each}
+    </div>
+  {/if}
 
   <!-- Frequency axis between the two canvases -->
   <div

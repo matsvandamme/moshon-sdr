@@ -84,7 +84,7 @@ Each phase ends with a tagged commit. Each milestone is roughly one PR.
 - [x] **B6c** SSB (USB + LSB) via Weaver's method: Rust `SsbDemod` shifts the desired sideband to DC, applies a real-coefficient LPF at `bandwidth/2` to kill the image sideband, then shifts back and takes the real part. Single struct with an `lsb: bool` constructor arg; worker maps `usb`/`lsb` modes to the two configurations. CW falls back to a narrow USB until B6d. (PRD M1.3 partial)
 - [x] **B6d** CW: Rust `CwDemod` — 127-tap narrow channel filter at `bandwidth/2` (default 500 Hz) and a fixed 700 Hz BFO mixer that turns the zero-beat carrier into an audible tone. Worker dispatches `cw` mode to the new demod. (PRD M1.3 complete) ✅
 - [x] **B6** Demods: WFM (mono+stereo), NFM, AM, SSB (USB/LSB via Weaver), CW (PRD M1.3) — stereo WFM deferred to M2.
-- [ ] **B7** URL hash state + memory channels + IARU band overlay + S-meter (PRD M1.7–M1.10)
+- [x] **B7** URL hash state (`#f=…&m=…&bw=…&g=…` restored on load via `history.replaceState`); localStorage memory channels (save/recall current tuning, max 50); IARU Region 1 band overlay strip above the spectrum frequency axis; peak-dBFS S-meter with rough S-unit mapping. (PRD M1.7–M1.10)
 - [ ] **B8** First-run onboarding with per-OS WebUSB setup links (PRD M1.11)
 - [ ] **B9** Network IQ source: `rtl_tcp` over WebSocket bridge + Go bridge daemon released for 6 platforms (PRD M1.12, M1.13)
 - [ ] **B10** Definition-of-Done validation: PRD success criteria S1–S5 confirmed. Tag `v0.1.0`.
@@ -151,9 +151,9 @@ These are non-negotiable. Violating any of them is a stop-the-line event.
 - B1a: cleanup + project identity (LICENSE, README, .gitignore, etc.)
 - B1c: scaffold `web/` (Svelte 5 + Vite + Tailwind 4 + lucide-svelte), `dsp/` (Cargo crate stub with `smoke()` export), `bridge/` (Go module + stub main.go)
 - B1d: four GitHub Actions workflows (ci, deploy, bridge-release, claude-review) + GoReleaser config
-**Currently working on:** B6 complete — all PRD M1.3 modes shipped (WFM, NFM, AM, USB, LSB, CW). Ready for B7 (URL hash state + memory channels + IARU bands + S-meter).
+**Currently working on:** B7 shipped (URL hash + memory channels + IARU bands + S-meter). Ready for B8 (first-run onboarding).
 **Blocked by:** None.
-**B6c+B6d hardware verification pending:** SSB on 14.230 MHz USB / 7.150 MHz LSB (voices intelligible). CW on a 14.020 MHz beacon (audible 700 Hz tone keyed on/off). Confirm M-hotkey cycles through all six modes while streaming without restart.
+**Verification pending:** (1) B6 hardware tests for all six modes; (2) URL share — copy hash to incognito and confirm tuning restores; (3) memory channel survives reload; (4) S-meter responds to a known signal.
 
 ## Agent behavior baseline
 

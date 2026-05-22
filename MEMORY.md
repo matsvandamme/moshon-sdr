@@ -35,6 +35,14 @@ Long-running notes that should survive across sessions but don't belong in the f
 - NFM/AM/SSB/CW are mode-cycle UI only — actual demod lands in B6b–B6d.
 - Next milestone: **B6b** — NFM + AM demods (much simpler than WFM; single-stage envelope/quadrature demods on the existing channelizer chain).
 
+**As of B7 (URL hash + channels + bands + S-meter):**
+- URL hash state in [web/src/lib/state/url-hash.ts](web/src/lib/state/url-hash.ts). Format `#f=145300000&m=nfm&bw=12500&g=AGC`. Reads in `onMount` (mode → bandwidth → centerFreq → gain, in that order so the mode setter doesn't clobber the others). Writes via `history.replaceState` from a `$effect` (no back-stack pollution while dragging).
+- **Hash never carries bridge URL** — privacy rule from decisions log. Only tuning state.
+- Memory channels in [web/src/lib/state/memory-channels.svelte.ts](web/src/lib/state/memory-channels.svelte.ts) — `localStorage` key `moshon.channels.v1` with version field for future migrations. Schema: `{id, name, freq, mode, bandwidth}`. Capped at 50. Storage failure (private mode/quota) drops silently — channels are nice-to-have.
+- IARU R1 band data in [web/src/lib/data/iaru-bands.ts](web/src/lib/data/iaru-bands.ts). Covers HF bands the R820T2 can only reach with direct-sampling mod (40 m → 10 m + warc + 160 m + 80 m) PLUS the directly-reachable VHF/UHF (6 m / 4 m / 2 m / 70 cm / 23 cm) AND broadcast/aircraft/marine context bands. Overlay strip in `SpectrumWaterfall.svelte` filters by `bandsInWindow(centerHz, sampleRate)`.
+- S-meter in [web/src/lib/dsp/smeter.ts](web/src/lib/dsp/smeter.ts) — `peakDbInChannel(bins, sampleRate, bandwidth)` takes the peak over the bins covering the channel BW; `dbToSUnit` anchors S9 at −50 dBFS with 6 dB per S-unit. **Calibration is arbitrary**, still needs on-air measurement against a known reference per the open TODO in this file.
+- Next milestone: **B8** — first-run onboarding (per-OS WebUSB setup links).
+
 **As of B6d (all modes live — B6 complete):**
 - B6d shipped. `CwDemod` (Rust) gives CW its own demod path instead of the B6c fallback to narrow USB.
 - Implementation: 127-tap channel filter at `bandwidth/2` cutoff (default 500 Hz BW = ±250 Hz around DC), then a fixed 700 Hz BFO mixer that shifts the (real audio = `Re{z·e^(+jω_bfo·t)}`) so a zero-beat carrier in IQ becomes an audible 700 Hz tone.
