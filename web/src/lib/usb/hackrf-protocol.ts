@@ -174,23 +174,34 @@ export function clampVgaDb(db: number): number {
   return Math.max(0, Math.min(62, stepped));
 }
 
+/** RF amplifier gain when on (per HackRF docs: ~11 dB pre-amp). */
+export const HACKRF_AMP_DB = 11;
+
 /**
- * Map a single user-facing gain in dB (0..~75) to the HackRF's three
- * gain stages. AMP adds a flat ~14 dB pre-amp; LNA covers 0..40 in 8 dB
- * steps; VGA covers 0..62 in 2 dB steps. We split greedily so the user
- * just sees "gain" and we pick a sensible distribution.
- *
- *   amp:  on iff userDb >= 50 (cabling/antenna noise figure is usually OK
- *         without amp below 50 dB total gain)
- *   lna:  cap LNA before VGA — LNA is lower noise figure
- *   vga:  fill the remainder
+ * HackRF's three independent gain stages. Per the official docs:
+ *   RF/AMP   — on/off, +11 dB when on
+ *   IF/LNA   — 0..40 dB in 8 dB steps (post-mixer)
+ *   BB/VGA   — 0..62 dB in 2 dB steps (baseband)
+ * Recommended starting point: RF=off, IF=16, BB=16. Adjust IF and BB
+ * roughly equally; only enable RF when signals are weak.
  */
 export type HackRfGain = { ampOn: boolean; lnaDb: number; vgaDb: number };
 
+export const HACKRF_DEFAULT_GAIN: HackRfGain = {
+  ampOn: false,
+  lnaDb: 16,
+  vgaDb: 16,
+};
+
+/**
+ * Fallback gain distribution from a single user-facing dB value, used
+ * only when the per-stage controls haven't been initialised yet (e.g.
+ * AGC selected on the unified gain dial). Greedy split: AMP at high
+ * total gain, LNA before VGA (LNA has the lower noise figure).
+ */
 export function distributeGain(userDb: number): HackRfGain {
   const ampOn = userDb >= 50;
-  const remaining = userDb - (ampOn ? 14 : 0);
-  // Greedy LNA first
+  const remaining = userDb - (ampOn ? HACKRF_AMP_DB : 0);
   const lnaDb = clampLnaDb(Math.min(40, Math.max(0, remaining)));
   const afterLna = Math.max(0, remaining - lnaDb);
   const vgaDb = clampVgaDb(Math.min(62, afterLna));

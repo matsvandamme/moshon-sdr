@@ -16,6 +16,7 @@
 
 import { SabRing } from '../lib/ring/sab-ring';
 import {
+  HACKRF_DEFAULT_GAIN,
   HRF_MODE,
   HRF_REQ,
   HACKRF_INTERFACE,
@@ -28,6 +29,7 @@ import {
   vendorIn1Byte,
   vendorOutNoData,
   vendorOutWithData,
+  type HackRfGain,
 } from '../lib/usb/hackrf-protocol';
 
 type InboundInit = {
@@ -38,6 +40,8 @@ type InboundInit = {
   sampleRate: number;
   centerFreq: number;
   gain: number | null;
+  /** Optional per-stage override. If present, takes precedence over `gain`. */
+  hackrfGain?: HackRfGain;
   iqRing: SharedArrayBuffer;
   statsIntervalMs: number;
 };
@@ -46,9 +50,18 @@ type InboundRetune = {
   centerFreq?: number;
   gain?: number | null;
 };
+type InboundSetStageGain = {
+  kind: 'setHackrfGain';
+  gain: HackRfGain;
+};
 type InboundStop = { kind: 'stop' };
 type InboundClose = { kind: 'close' };
-type Inbound = InboundInit | InboundRetune | InboundStop | InboundClose;
+type Inbound =
+  | InboundInit
+  | InboundRetune
+  | InboundSetStageGain
+  | InboundStop
+  | InboundClose;
 
 type OutboundStarted = {
   kind: 'started';
@@ -69,13 +82,6 @@ type Outbound = OutboundStarted | OutboundStats | OutboundStopped | OutboundErro
  *  and matches HackRF One's USB block size. */
 const TRANSFER_BYTES = 32_768;
 
-/** Default AGC behaviour when the user picks gain = null:
- *  LNA = 16, VGA = 20, AMP off → moderate gain that works for most VHF/UHF. */
-const DEFAULT_GAIN_AGC: { ampOn: boolean; lnaDb: number; vgaDb: number } = {
-  ampOn: false,
-  lnaDb: 16,
-  vgaDb: 20,
-};
 
 let device: USBDevice | null = null;
 let ring: SabRing | null = null;
@@ -148,7 +154,9 @@ async function init(opts: InboundInit) {
     );
 
     await applyFrequency(opts.centerFreq);
-    await applyGain(opts.gain);
+    const stages = opts.hackrfGain
+      ?? (opts.gain === null ? HACKRF_DEFAULT_GAIN : distributeGain(opts.gain));
+    await applyStageGain(stages);
 
     // Start the RX stream.
     await vendorOutNoData(device, HRF_REQ.SET_TRANSCEIVER_MODE, HRF_MODE.RX, 0);
@@ -186,17 +194,20 @@ async function applyFrequency(freqHz: number): Promise<void> {
   await vendorOutWithData(device, HRF_REQ.SET_FREQ, 0, 0, packSetFreqPayload(freqHz));
 }
 
-async function applyGain(gain: number | null): Promise<void> {
+async function applyStageGain(stages: HackRfGain): Promise<void> {
   if (!device) return;
-  const stages = gain === null ? DEFAULT_GAIN_AGC : distributeGain(gain);
   // AMP: OUT, no data; wValue = 0 or 1.
   await vendorOutNoData(device, HRF_REQ.AMP_ENABLE, stages.ampOn ? 1 : 0, 0);
   // LNA + VGA: actually IN transfers per libhackrf — the device returns a
-  // 1-byte ack indicating whether the value was accepted. Sending these as
-  // OUT triggers a STALL ("transfer error has occurred") on Chromium WebUSB.
-  // gain dB goes in wIndex; wValue is reserved (zero).
+  // 1-byte ack. Sending these as OUT triggers a STALL on Chromium WebUSB.
+  // The gain value lives in wIndex; wValue is reserved (zero).
   await vendorIn1Byte(device, HRF_REQ.SET_LNA_GAIN, 0, clampLnaDb(stages.lnaDb));
   await vendorIn1Byte(device, HRF_REQ.SET_VGA_GAIN, 0, clampVgaDb(stages.vgaDb));
+}
+
+async function applyLegacyGain(gain: number | null): Promise<void> {
+  const stages = gain === null ? HACKRF_DEFAULT_GAIN : distributeGain(gain);
+  await applyStageGain(stages);
 }
 
 async function readLoop() {
@@ -251,8 +262,17 @@ async function retune(opts: InboundRetune) {
       await applyFrequency(opts.centerFreq);
     }
     if (opts.gain !== undefined) {
-      await applyGain(opts.gain);
+      await applyLegacyGain(opts.gain);
     }
+  } catch (err) {
+    postOut({ kind: 'error', message: errMessage(err) });
+  }
+}
+
+async function setStageGain(stages: HackRfGain): Promise<void> {
+  if (!device) return;
+  try {
+    await applyStageGain(stages);
   } catch (err) {
     postOut({ kind: 'error', message: errMessage(err) });
   }
@@ -311,6 +331,9 @@ self.onmessage = (e: MessageEvent<Inbound>) => {
       break;
     case 'retune':
       void retune(msg);
+      break;
+    case 'setHackrfGain':
+      void setStageGain(msg.gain);
       break;
     case 'stop':
       void stop();

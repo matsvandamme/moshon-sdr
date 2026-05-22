@@ -14,7 +14,7 @@
 
 import { SabRing } from '../ring/sab-ring';
 import type { Mode } from '../state/tuning.svelte';
-import { HACKRF_USB_FILTERS } from './hackrf-protocol';
+import { HACKRF_USB_FILTERS, type HackRfGain } from './hackrf-protocol';
 import type { DemodMode } from '../../workers/dsp-worker';
 
 const IQ_RING_CAPACITY_BYTES = 8 * 1024 * 1024;
@@ -25,7 +25,10 @@ export type HackRfStatus = 'idle' | 'connecting' | 'connected' | 'streaming' | '
 export type StreamOptions = {
   sampleRate: number;
   centerFreq: number;
+  /** Legacy single-slider gain; only used when `hackrfGain` is omitted. */
   gain: number | null;
+  /** Explicit per-stage HackRF gain (AMP/LNA/VGA). Preferred path. */
+  hackrfGain?: HackRfGain;
   mode: Mode;
   bandwidthHz: number;
   fftSize?: number;
@@ -127,6 +130,7 @@ export class HackRfSource {
       sampleRate: opts.sampleRate,
       centerFreq: opts.centerFreq,
       gain: opts.gain,
+      hackrfGain: opts.hackrfGain,
       iqRing: this.ring.buffer,
       statsIntervalMs: STATS_INTERVAL_MS,
     });
@@ -147,6 +151,16 @@ export class HackRfSource {
   setRecording(on: boolean): void {
     if (!this.dspWorker) return;
     this.dspWorker.postMessage({ kind: 'setRecording', on });
+  }
+
+  /**
+   * Push new per-stage gain values to the device without restarting the
+   * stream. Each call applies all three stages even when only one changed
+   * — the cost is trivial (three control transfers, sub-millisecond).
+   */
+  setHackrfGain(gain: HackRfGain): void {
+    if (!this.hrfWorker) return;
+    this.hrfWorker.postMessage({ kind: 'setHackrfGain', gain });
   }
 
   async stop(): Promise<void> {

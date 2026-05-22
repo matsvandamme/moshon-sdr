@@ -22,6 +22,7 @@
   import { RtlSdrSource, type RtlSdrStatus } from './lib/usb/rtlsdr-source';
   import { RtlTcpSource } from './lib/usb/rtltcp-source';
   import { HackRfSource } from './lib/usb/hackrf-source';
+  import { HACKRF_DEFAULT_GAIN, HACKRF_AMP_DB } from './lib/usb/hackrf-protocol';
   import type { ColormapName } from './lib/visualizer/spectrum-waterfall';
   import {
     tuning,
@@ -63,6 +64,13 @@
   let inputMode = $state<InputMode>('usb');
   let bridgeUrl = $state('http://127.0.0.1:9090');
   let rtlTcpTarget = $state('');
+
+  // HackRF per-stage gain (AMP/LNA/VGA). Defaults match the official docs:
+  // RF=off, IF=16, BB=16. Persisted to localStorage so settings survive
+  // reloads independent of the unified `tuning.gain`.
+  let hrfAmpOn = $state(HACKRF_DEFAULT_GAIN.ampOn);
+  let hrfLnaDb = $state(HACKRF_DEFAULT_GAIN.lnaDb);
+  let hrfVgaDb = $state(HACKRF_DEFAULT_GAIN.vgaDb);
 
   function activeSource(): RtlSdrSource | HackRfSource | RtlTcpSource {
     if (inputMode === 'hackrf') return hackrfSource;
@@ -129,6 +137,13 @@
       if (savedMode === 'usb' || savedMode === 'hackrf' || savedMode === 'network') {
         inputMode = savedMode;
       }
+      const savedHrf = localStorage.getItem('moshon.hackrfGain.v1');
+      if (savedHrf) {
+        const parsed = JSON.parse(savedHrf) as Partial<typeof HACKRF_DEFAULT_GAIN>;
+        if (typeof parsed.ampOn === 'boolean') hrfAmpOn = parsed.ampOn;
+        if (typeof parsed.lnaDb === 'number') hrfLnaDb = parsed.lnaDb;
+        if (typeof parsed.vgaDb === 'number') hrfVgaDb = parsed.vgaDb;
+      }
     } catch {
       // localStorage unavailable — skip onboarding entirely rather than
       // forcing it on every load.
@@ -177,6 +192,24 @@
       localStorage.setItem('moshon.inputMode.v1', mode);
     } catch {
       // ignore
+    }
+  });
+
+  // Persist HackRF per-stage gain + push live changes to the worker.
+  $effect(() => {
+    const amp = hrfAmpOn;
+    const lna = hrfLnaDb;
+    const vga = hrfVgaDb;
+    try {
+      localStorage.setItem(
+        'moshon.hackrfGain.v1',
+        JSON.stringify({ ampOn: amp, lnaDb: lna, vgaDb: vga }),
+      );
+    } catch {
+      // ignore
+    }
+    if (inputMode === 'hackrf' && rtlStatus === 'streaming') {
+      hackrfSource.setHackrfGain({ ampOn: amp, lnaDb: lna, vgaDb: vga });
     }
   });
 
@@ -360,7 +393,7 @@
     try {
       await startAudio();
       rtlStatus = 'streaming';
-      const opts = {
+      const baseOpts = {
         sampleRate: SAMPLE_RATE,
         centerFreq: tuning.centerFreq,
         gain: tuning.gain,
@@ -371,9 +404,12 @@
         audioRing: audio.ring!.buffer,
       };
       if (inputMode === 'hackrf') {
-        await hackrfSource.start(opts);
+        await hackrfSource.start({
+          ...baseOpts,
+          hackrfGain: { ampOn: hrfAmpOn, lnaDb: hrfLnaDb, vgaDb: hrfVgaDb },
+        });
       } else {
-        await usbSource.start(opts);
+        await usbSource.start(baseOpts);
       }
     } catch (err) {
       rtlStatus = 'error';
@@ -736,7 +772,13 @@
           </div>
           <div class="lg:flex lg:items-baseline lg:gap-2">
             <dt class="text-neutral-500 uppercase">Gain</dt>
-            <dd class="text-neutral-200">{gainLabel(tuning.gain)}</dd>
+            <dd class="text-neutral-200">
+              {#if inputMode === 'hackrf'}
+                {hrfAmpOn ? `+${HACKRF_AMP_DB}` : '–'} / {hrfLnaDb} / {hrfVgaDb} dB
+              {:else}
+                {gainLabel(tuning.gain)}
+              {/if}
+            </dd>
           </div>
         </dl>
       </div>
@@ -941,6 +983,74 @@
           />
         </label>
       </div>
+
+      <!-- HackRF gain stages (M2.5b). Three independent controls per the
+           official docs. Start values are RF=off, IF=16, BB=16; adjust
+           IF and BB roughly together and only enable RF if signals are
+           weak. Changes apply live to the device. -->
+      {#if inputMode === 'hackrf'}
+        <div
+          class="mb-4 rounded-md border border-neutral-800 bg-neutral-900 p-3 font-mono text-xs"
+          aria-label="HackRF gain stages"
+        >
+          <header class="flex items-center justify-between mb-2 text-neutral-500 uppercase">
+            <span>HackRF gain</span>
+            <span class="text-neutral-600 normal-case">
+              total ≈ {(hrfAmpOn ? HACKRF_AMP_DB : 0) + hrfLnaDb + hrfVgaDb} dB
+            </span>
+          </header>
+
+          <div class="flex items-center gap-3 mb-2">
+            <button
+              type="button"
+              onclick={() => (hrfAmpOn = !hrfAmpOn)}
+              class="rounded border px-2 py-1 cursor-pointer"
+              class:bg-amber-950={hrfAmpOn}
+              class:border-amber-700={hrfAmpOn}
+              class:text-amber-300={hrfAmpOn}
+              class:border-neutral-700={!hrfAmpOn}
+              class:text-neutral-400={!hrfAmpOn}
+              aria-pressed={hrfAmpOn}
+              title="RF amplifier (~+11 dB). Use only for weak signals."
+            >
+              RF +{HACKRF_AMP_DB} dB · {hrfAmpOn ? 'ON' : 'off'}
+            </button>
+            <span class="text-neutral-600 text-[10px]">
+              pre-amp before LNA — adds noise, use sparingly
+            </span>
+          </div>
+
+          <label class="flex items-center gap-3 mb-1.5">
+            <span class="text-neutral-500 uppercase text-[10px] w-8">IF</span>
+            <input
+              type="range"
+              min="0"
+              max="40"
+              step="8"
+              bind:value={hrfLnaDb}
+              class="flex-1"
+            />
+            <span class="text-(--color-accent) w-12 text-right tabular-nums">
+              {hrfLnaDb} dB
+            </span>
+          </label>
+
+          <label class="flex items-center gap-3">
+            <span class="text-neutral-500 uppercase text-[10px] w-8">BB</span>
+            <input
+              type="range"
+              min="0"
+              max="62"
+              step="2"
+              bind:value={hrfVgaDb}
+              class="flex-1"
+            />
+            <span class="text-(--color-accent) w-12 text-right tabular-nums">
+              {hrfVgaDb} dB
+            </span>
+          </label>
+        </div>
+      {/if}
 
       <!-- Memory channels (B7) -->
       <div class="mb-4">
