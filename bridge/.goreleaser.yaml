@@ -2,12 +2,6 @@ version: 2
 
 project_name: moshon-bridge
 
-# Tags fire as `bridge-vX.Y.Z` (the workflow trigger pattern in
-# .github/workflows/bridge-release.yml). Without this hint GoReleaser fails
-# to parse the tag as semver because of the `bridge-` prefix.
-monorepo:
-  tag_prefix: bridge-
-
 before:
   hooks:
     - go mod tidy

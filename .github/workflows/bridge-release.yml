@@ -1,9 +1,14 @@
 name: Bridge release
 
+# v0.1.0 plan: web + bridge ship from the same `vX.Y.Z` tag. GoReleaser
+# attaches the six bridge binaries to that GitHub Release; the web is
+# continuously deployed from `main` and doesn't need its own tag attachment.
+# The earlier `bridge-v*` scheme broke semver parsing in OSS GoReleaser
+# (the `bridge-` prefix needs the Pro-only `monorepo.tag_prefix` config).
 on:
   push:
     tags:
-      - 'bridge-v*'
+      - 'v*'
 
 permissions:
   contents: write
