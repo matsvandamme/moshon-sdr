@@ -91,6 +91,7 @@ Each phase ends with a tagged commit. Each milestone is roughly one PR.
 
 ### Phase 3 — M2 should-haves (weeks 10+)
 - [x] **M2.0** Stereo WFM (completes the deferred half of M1.3). Adds 19 kHz pilot detection via biquad BPF, coherent 38 kHz reference recovered by squaring + biquad BPF, dynamic normalization keyed off the smoothed pilot envelope, 50 µs de-emphasis. Output path is now interleaved L,R at 48 kHz across the whole DSP→worklet chain; non-WFM demods duplicate to L=R so the layout is uniform.
+- [x] **M2.1** Audio recording. DSP worker exposes a `setRecording(on)` switch; while enabled it posts transferable Float32Array audio batches (pre-volume / pre-mute) back to main alongside the SAB writes. New `recorder` Svelte 5 store accumulates chunks, caps at 5 min stereo (~115 MB), and on stop encodes a 16-bit PCM WAV via `lib/audio/wav-encoder.ts` and triggers a download. Filename includes frequency, mode, and timestamp.
 - [ ] HackRF One driver
 - [ ] ADS-B mode (`/adsb` route, lazy WASM)
 - [ ] RDS for WFM

@@ -35,6 +35,14 @@ Long-running notes that should survive across sessions but don't belong in the f
 - NFM/AM/SSB/CW are mode-cycle UI only — actual demod lands in B6b–B6d.
 - Next milestone: **B6b** — NFM + AM demods (much simpler than WFM; single-stage envelope/quadrature demods on the existing channelizer chain).
 
+**As of M2.1 (audio recording):**
+- M2.1 shipped: in-app WAV recorder.
+- DSP worker tap: when `setRecording(true)` is sent, the worker copies each demodulated audio batch (interleaved L,R f32, pre-volume / pre-mute) into a transferable buffer and posts it back to main alongside the SAB ring write. ~384 KB/s of postMessage traffic at 48 kHz stereo — fine.
+- Recorder store in [web/src/lib/audio/recorder.svelte.ts](web/src/lib/audio/recorder.svelte.ts) accumulates Float32Array chunks in memory. Cap at 5 minutes of stereo (~115 MB) — when hit, recording auto-stops and the partial file is downloaded.
+- WAV encoder in [web/src/lib/audio/wav-encoder.ts](web/src/lib/audio/wav-encoder.ts) — 16-bit PCM, 48 kHz, stereo. Asymmetric f32→int16 scaling so unity-negative peaks don't wrap.
+- Filename pattern: `moshon-<freq>-<mode>-<ts>.wav`, e.g. `moshon-100.500MHz-WFM-2026-05-22T20-15-08.wav`.
+- UI: Record button in the audio row, disabled when not streaming, shows captured-seconds counter while recording, single click toggles record/stop.
+
 **As of M2.0 (stereo WFM):**
 - M2.0 shipped: stereo broadcast FM. Closes the deferred half of PRD M1.3.
 - `WfmDemod` now returns interleaved L,R Float32Array at 48 kHz. Two RealDecimators (sum + diff) run in parallel.

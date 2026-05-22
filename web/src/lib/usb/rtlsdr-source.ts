@@ -66,8 +66,15 @@ export type FftEvent = {
   time: number;
 };
 
+export type AudioEvent = {
+  /** Interleaved L,R Float32 samples at 48 kHz. Transferable, owned by callback. */
+  samples: Float32Array;
+  time: number;
+};
+
 export type StatsCallback = (evt: StatsEvent) => void;
 export type FftCallback = (evt: FftEvent) => void;
+export type AudioCallback = (evt: AudioEvent) => void;
 
 // USB-worker outbound message shapes (mirror usb-worker.ts).
 type UsbStarted = { kind: 'started'; actualSampleRate: number; actualFrequency: number };
@@ -79,8 +86,9 @@ type UsbOutbound = UsbStarted | UsbStats | UsbStopped | UsbErr;
 // DSP-worker outbound message shapes (mirror dsp-worker.ts).
 type DspReady = { kind: 'ready' };
 type DspFft = { kind: 'fft'; bins: Float32Array; time: number };
+type DspAudio = { kind: 'audio'; samples: Float32Array; time: number };
 type DspErr = { kind: 'error'; message: string };
-type DspOutbound = DspReady | DspFft | DspErr;
+type DspOutbound = DspReady | DspFft | DspAudio | DspErr;
 
 export class RtlSdrSource {
   private usbWorker: Worker | null = null;
@@ -93,6 +101,7 @@ export class RtlSdrSource {
 
   private statsListeners = new Set<StatsCallback>();
   private fftListeners = new Set<FftCallback>();
+  private audioListeners = new Set<AudioCallback>();
 
   /**
    * Opens a device via the WebUSB picker. Must be called inside a user-gesture
@@ -173,6 +182,15 @@ export class RtlSdrSource {
     this.dspWorker.postMessage({ kind: 'setMode', mode, bandwidthHz });
   }
 
+  /**
+   * Toggle whether the DSP worker forwards demodulated audio batches to
+   * the main thread (for recording).
+   */
+  setRecording(on: boolean): void {
+    if (!this.dspWorker) return;
+    this.dspWorker.postMessage({ kind: 'setRecording', on });
+  }
+
   /** Stops streaming. Device remains permitted but the workers shut down. */
   async stop(): Promise<void> {
     if (!this.usbWorker) return;
@@ -212,6 +230,13 @@ export class RtlSdrSource {
     this.fftListeners.add(cb);
     return () => {
       this.fftListeners.delete(cb);
+    };
+  }
+
+  onAudio(cb: AudioCallback): () => void {
+    this.audioListeners.add(cb);
+    return () => {
+      this.audioListeners.delete(cb);
     };
   }
 
@@ -270,6 +295,11 @@ export class RtlSdrSource {
       case 'fft':
         for (const cb of this.fftListeners) {
           cb({ bins: msg.bins, time: msg.time });
+        }
+        break;
+      case 'audio':
+        for (const cb of this.audioListeners) {
+          cb({ samples: msg.samples, time: msg.time });
         }
         break;
       case 'error':

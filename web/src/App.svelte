@@ -14,6 +14,8 @@
     HelpCircle,
     Usb,
     Wifi,
+    Circle,
+    Download,
   } from 'lucide-svelte';
   import { onMount, onDestroy } from 'svelte';
   import init, { smoke } from './lib/dsp/wasm/moshon_dsp.js';
@@ -34,6 +36,7 @@
   import Onboarding from './lib/ui/Onboarding.svelte';
   import NetworkConnect from './lib/ui/NetworkConnect.svelte';
   import { AudioPipeline } from './lib/audio/audio-pipeline';
+  import { recorder } from './lib/audio/recorder.svelte';
   import { readHash, writeHash } from './lib/state/url-hash';
   import { peakDbInChannel, dbToSUnit } from './lib/dsp/smeter';
 
@@ -91,6 +94,8 @@
   let helpOpen = $state(false);
   let freqEntryOpen = $state(false);
   let onboardingOpen = $state(false);
+
+  let unsubRecAudio: (() => void) | null = null;
 
   // ---- Lifecycle ----
 
@@ -226,6 +231,7 @@
     const src = activeSource();
     unsubStats?.();
     unsubFft?.();
+    unsubRecAudio?.();
     unsubStats = src.onStats((s) => {
       bytesWritten = s.bytesWritten;
       bytesDropped = s.bytesDropped;
@@ -233,6 +239,13 @@
     unsubFft = src.onFft((evt) => {
       latestBins = evt.bins;
       fftFramesRendered++;
+    });
+    unsubRecAudio = src.onAudio((evt) => {
+      const fits = recorder.push(evt.samples);
+      if (!fits) {
+        // Hit the memory cap — finalize the recording for the user.
+        onRecordToggle();
+      }
     });
   }
 
@@ -257,9 +270,23 @@
     unsubStats?.();
     unsubFft?.();
     unsubAudio?.();
+    unsubRecAudio?.();
     unsubStats = null;
     unsubFft = null;
     unsubAudio = null;
+    unsubRecAudio = null;
+    // If a recording was in progress, save what we have.
+    if (recorder.recording) recorder.stopAndDownload();
+  }
+
+  function onRecordToggle() {
+    if (recorder.recording) {
+      activeSource().setRecording(false);
+      recorder.stopAndDownload();
+    } else {
+      recorder.start();
+      activeSource().setRecording(true);
+    }
   }
 
   async function onConnect() {
@@ -530,7 +557,7 @@
           <Keyboard size={12} />
           <span>?</span>
         </button>
-        <span class="font-mono text-xs text-neutral-500">B3 · B4 · B5 · B6 · B7 · B8 · B9</span>
+        <span class="font-mono text-xs text-neutral-500">B3..B9 · M2</span>
       </div>
     </header>
 
@@ -694,6 +721,32 @@
             {Math.round(volume * 100)}%
           </span>
         </label>
+
+        <!-- Recorder (M2.1) -->
+        <button
+          type="button"
+          onclick={onRecordToggle}
+          disabled={rtlStatus !== 'streaming'}
+          class="inline-flex items-center gap-2 rounded border px-3 py-1.5 cursor-pointer
+                 disabled:opacity-40 disabled:cursor-not-allowed"
+          class:bg-rose-950={recorder.recording}
+          class:border-rose-700={recorder.recording}
+          class:text-rose-300={recorder.recording}
+          class:border-neutral-700={!recorder.recording}
+          class:text-neutral-300={!recorder.recording}
+          aria-pressed={recorder.recording}
+          title={recorder.recording
+            ? `Stop & download (${recorder.seconds.toFixed(0)} s captured, cap ${recorder.capMinutes} min)`
+            : 'Record demodulated audio to WAV'}
+        >
+          {#if recorder.recording}
+            <Circle size={10} fill="currentColor" class="animate-pulse" />
+            <span class="tabular-nums">{recorder.seconds.toFixed(0)}s</span>
+          {:else}
+            <Download size={14} />
+            <span>Rec</span>
+          {/if}
+        </button>
       </div>
 
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4 text-xs font-mono">

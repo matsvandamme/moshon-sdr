@@ -45,8 +45,14 @@ export type FftEvent = {
   time: number;
 };
 
+export type AudioEvent = {
+  samples: Float32Array;
+  time: number;
+};
+
 export type StatsCallback = (evt: StatsEvent) => void;
 export type FftCallback = (evt: FftEvent) => void;
+export type AudioCallback = (evt: AudioEvent) => void;
 
 // Mirror outbound shapes from network-worker.ts.
 type NetStarted = { kind: 'started'; tunerType: number; tunerGainCount: number };
@@ -58,8 +64,9 @@ type NetOutbound = NetStarted | NetStats | NetStopped | NetErr;
 // Mirror DSP worker.
 type DspReady = { kind: 'ready' };
 type DspFft = { kind: 'fft'; bins: Float32Array; time: number };
+type DspAudio = { kind: 'audio'; samples: Float32Array; time: number };
 type DspErr = { kind: 'error'; message: string };
-type DspOutbound = DspReady | DspFft | DspErr;
+type DspOutbound = DspReady | DspFft | DspAudio | DspErr;
 
 export class RtlTcpSource {
   private netWorker: Worker | null = null;
@@ -70,6 +77,7 @@ export class RtlTcpSource {
 
   private statsListeners = new Set<StatsCallback>();
   private fftListeners = new Set<FftCallback>();
+  private audioListeners = new Set<AudioCallback>();
 
   /** Construct the WebSocket URL from a bridge base URL + optional target. */
   static buildWsUrl(bridgeUrl: string, rtlTcpTarget?: string): string {
@@ -135,6 +143,11 @@ export class RtlTcpSource {
     this.dspWorker.postMessage({ kind: 'setMode', mode, bandwidthHz });
   }
 
+  setRecording(on: boolean): void {
+    if (!this.dspWorker) return;
+    this.dspWorker.postMessage({ kind: 'setRecording', on });
+  }
+
   async stop(): Promise<void> {
     this.netWorker?.postMessage({ kind: 'stop' });
     this.dspWorker?.postMessage({ kind: 'stop' });
@@ -166,6 +179,13 @@ export class RtlTcpSource {
     this.fftListeners.add(cb);
     return () => {
       this.fftListeners.delete(cb);
+    };
+  }
+
+  onAudio(cb: AudioCallback): () => void {
+    this.audioListeners.add(cb);
+    return () => {
+      this.audioListeners.delete(cb);
     };
   }
 
@@ -223,6 +243,11 @@ export class RtlTcpSource {
       case 'fft':
         for (const cb of this.fftListeners) {
           cb({ bins: msg.bins, time: msg.time });
+        }
+        break;
+      case 'audio':
+        for (const cb of this.audioListeners) {
+          cb({ samples: msg.samples, time: msg.time });
         }
         break;
       case 'error':

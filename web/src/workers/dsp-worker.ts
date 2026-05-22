@@ -38,12 +38,14 @@ type InboundInit = {
 };
 type InboundSetMode = { kind: 'setMode'; mode: DemodMode; bandwidthHz: number };
 type InboundStop = { kind: 'stop' };
-type Inbound = InboundInit | InboundSetMode | InboundStop;
+type InboundSetRecording = { kind: 'setRecording'; on: boolean };
+type Inbound = InboundInit | InboundSetMode | InboundStop | InboundSetRecording;
 
 type OutboundReady = { kind: 'ready' };
 type OutboundFft = { kind: 'fft'; bins: Float32Array; time: number };
+type OutboundAudio = { kind: 'audio'; samples: Float32Array; time: number };
 type OutboundError = { kind: 'error'; message: string };
-type Outbound = OutboundReady | OutboundFft | OutboundError;
+type Outbound = OutboundReady | OutboundFft | OutboundAudio | OutboundError;
 
 type Demod = {
   process(iq: Uint8Array): Float32Array;
@@ -75,9 +77,21 @@ let iqBufferForFft: Uint8Array | null = null;
 let running = false;
 let minPostIntervalMs = 33;
 let lastPostMs = 0;
+let recording = false;
 
 function postOut(msg: Outbound, transfer: Transferable[] = []) {
   self.postMessage(msg, { transfer });
+}
+
+/**
+ * If recording is on, ship a transferable copy of `stereo` (interleaved L,R
+ * f32) back to main. We copy because the original is also being pushed into
+ * the audio SAB ring — transferring would empty it.
+ */
+function maybeTapForRecording(stereo: Float32Array) {
+  if (!recording || stereo.length === 0) return;
+  const copy = new Float32Array(stereo);
+  postOut({ kind: 'audio', samples: copy, time: performance.now() }, [copy.buffer]);
 }
 
 function buildDemod(mode: DemodMode, bandwidthHz: number): Demod {
@@ -165,6 +179,7 @@ async function processLoop() {
         currentMode === 'wfm' ? audio : monoToInterleavedStereo(audio);
       const bytes = new Uint8Array(stereo.buffer, stereo.byteOffset, stereo.byteLength);
       audioRing.write(bytes);
+      maybeTapForRecording(stereo);
     }
 
     // Drain AT MOST one backlog chunk per iteration. Draining the entire
@@ -187,6 +202,7 @@ async function processLoop() {
             stereoMore.byteLength,
           );
           audioRing.write(moreBytes);
+          maybeTapForRecording(stereoMore);
         }
       } catch (err) {
         running = false;
@@ -214,6 +230,9 @@ self.onmessage = (e: MessageEvent<Inbound>) => {
       if (msg.mode !== currentMode || msg.bandwidthHz !== currentBandwidth) {
         rebuildDemod(msg.mode, msg.bandwidthHz);
       }
+      break;
+    case 'setRecording':
+      recording = msg.on;
       break;
     case 'stop':
       running = false;
