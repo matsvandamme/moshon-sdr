@@ -106,8 +106,18 @@
       elapsedMs = performance.now() - streamStartMs;
     }
     if (latestBins) {
-      spectrumRenderer?.draw(latestBins);
-      waterfallRenderer?.push(latestBins);
+      // Re-apply controls every frame. Cheap, and guarantees slider/dropdown
+      // changes take effect even if the $effect chain doesn't re-fire (e.g.
+      // because renderer instance refs aren't $state-tracked).
+      if (spectrumRenderer) {
+        spectrumRenderer.setRange(dbMin, dbMax);
+        spectrumRenderer.draw(latestBins);
+      }
+      if (waterfallRenderer) {
+        waterfallRenderer.setRange(dbMin, dbMax);
+        waterfallRenderer.setColormap(colormap);
+        waterfallRenderer.push(latestBins);
+      }
       latestBins = null;
       fftFramesRendered++;
     }

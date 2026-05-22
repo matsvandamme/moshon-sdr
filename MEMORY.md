@@ -17,8 +17,15 @@ Long-running notes that should survive across sessions but don't belong in the f
 - End-to-end **deploy** verified at https://moshon-sdr.pages.dev — green "DSP module ready" badge confirms Rust→WASM→Vite→Cloudflare→browser pipeline works. COOP/COEP headers serving correctly.
 - Toolchains installed on author's Win11 machine: Node 24, pnpm 11, Rust 1.95 + cargo, Go 1.26.3, wasm-pack 0.15, VS Build Tools 2022.
 - Cloudflare Pages project `moshon-sdr` exists; deploy workflow self-bootstraps via `pages project create` (idempotent).
-- Next milestone: **B3 — RTL-SDR v3/v4 WebUSB driver** via `webrtlsdr` dependency.
-- Hardware on hand: (to be confirmed by author)
+- Next milestone (at the time): B3 — has since been completed along with B4.
+
+**As of B4b (deployed and live):**
+- B3 + B4a + B4b shipped. Live at https://moshon-sdr.pages.dev.
+- Hardware verified: SDR ADS-B dongle (R820T2) confirmed working — WebUSB → Worker → SAB → DSP worker → RustFFT → spectrum + waterfall.
+- Nooelec Smartee XTR (E4000) NOT supported by `webrtlsdr` (R820/828/860 only). Future work.
+- Deploy CI: API-probe project existence (no more red badges); ASCII `--commit-message` (Cloudflare rejects some Unicode in commit messages — keep commit subjects/bodies ASCII for clean deploys, OR use the explicit override in `.github/workflows/deploy.yml`).
+- B4b known UI issue: colormap dropdown + dB sliders weren't visibly applying. Fixed by re-applying settings on every rAF tick instead of trusting `$effect` to fire when renderer instances (plain vars, not `$state`) aren't reactive deps.
+- Next milestone: **B5 — tuning UI** (keyboard hotkeys: `F`/`M`/`B`/`G`/`,`/`.`/`[`/`]`/`Space`/`?`; mouse: click waterfall to set center, scroll-wheel fine-tune, virtual VFO dial; PRD says both paths must reach parity).
 
 ## Open empirical questions (resolve in code, not in docs)
 
