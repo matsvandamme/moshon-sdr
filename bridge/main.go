@@ -33,7 +33,9 @@ import (
 	"github.com/coder/websocket"
 )
 
-const version = "0.1.0-dev"
+// Overridden at link time by GoReleaser: `-X main.version={{.Version}}`.
+// Must be `var`, not `const`, because `-X` cannot patch constants.
+var version = "dev"
 
 // Maximum size of a control frame the client may send. rtl_tcp commands are
 // 5 bytes — bumping the cap to 4 KB allows headroom for any batched future
