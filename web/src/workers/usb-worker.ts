@@ -13,9 +13,18 @@
 
 import { RTL2832U, type RtlDevice, type SampleBlock } from '@jtarrio/webrtlsdr/rtlsdr.js';
 
+/**
+ * USBDevice instances are NOT structured-cloneable / transferable, so the
+ * main thread can't postMessage a device to us. Instead, after the main
+ * thread grants permission via navigator.usb.requestDevice(), it sends us
+ * the device's identifiers and we look it up via navigator.usb.getDevices().
+ * Permissions are per-origin, so the device is visible to us once granted.
+ */
 type InboundInit = {
   kind: 'init';
-  device: USBDevice;
+  vendorId: number;
+  productId: number;
+  serialNumber?: string;
   sampleRate: number;
   centerFreq: number;
   gain: number | null;
@@ -51,7 +60,23 @@ function postOut(msg: Outbound, transfer: Transferable[] = []) {
 
 async function init(opts: InboundInit) {
   try {
-    device = await RTL2832U.open(opts.device);
+    if (!('usb' in navigator)) {
+      throw new Error('WebUSB not available in this Worker context');
+    }
+    const granted = await navigator.usb.getDevices();
+    const usbDevice = granted.find(
+      (d) =>
+        d.vendorId === opts.vendorId &&
+        d.productId === opts.productId &&
+        (opts.serialNumber === undefined || d.serialNumber === opts.serialNumber),
+    );
+    if (!usbDevice) {
+      throw new Error(
+        `Device ${opts.vendorId.toString(16)}:${opts.productId.toString(16)} not found in granted devices`,
+      );
+    }
+    await usbDevice.open();
+    device = await RTL2832U.open(usbDevice);
     const actualSampleRate = await device.setSampleRate(opts.sampleRate);
     const actualFrequency = await device.setCenterFrequency(opts.centerFreq);
     await device.setGain(opts.gain);

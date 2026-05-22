@@ -76,7 +76,11 @@ export class RtlSdrSource {
     this.device = await navigator.usb.requestDevice({ filters: RTL2832U_FILTERS });
   }
 
-  /** Spawns the USB worker (if needed), transfers the device, and starts streaming. */
+  /**
+   * Spawns the USB worker (if needed) and starts streaming. The device the
+   * user picked in connect() is permitted at the origin level, so the worker
+   * can look it up via navigator.usb.getDevices() — we only pass identifiers.
+   */
   async start(opts: StreamOptions): Promise<void> {
     if (!this.device) throw new Error('connect() before start()');
 
@@ -95,20 +99,16 @@ export class RtlSdrSource {
       this.startResolver = { resolve, reject };
     });
 
-    // USBDevice is transferable. Once this postMessage returns, the device
-    // is detached on this side; we null it out to avoid accidental reuse.
-    this.worker.postMessage(
-      {
-        kind: 'init',
-        device: this.device,
-        sampleRate: opts.sampleRate,
-        centerFreq: opts.centerFreq,
-        gain: opts.gain,
-        chunkSamples: DEFAULT_CHUNK_SAMPLES,
-      },
-      [this.device],
-    );
-    this.device = null;
+    this.worker.postMessage({
+      kind: 'init',
+      vendorId: this.device.vendorId,
+      productId: this.device.productId,
+      serialNumber: this.device.serialNumber,
+      sampleRate: opts.sampleRate,
+      centerFreq: opts.centerFreq,
+      gain: opts.gain,
+      chunkSamples: DEFAULT_CHUNK_SAMPLES,
+    });
 
     return startPromise;
   }
