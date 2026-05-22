@@ -16,5 +16,9 @@
     "checkJs": true,
     "moduleDetection": "force"
   },
-  "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.svelte"]
+  "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.svelte"],
+  // wasm-pack outputs untyped .js that doesn't pass strict checks. We still
+  // get types via the sibling .d.ts which svelte-check picks up via the
+  // @ts-self-types comment in the generated module.
+  "exclude": ["src/lib/dsp/wasm/**/*"]
 }

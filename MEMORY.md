@@ -25,7 +25,8 @@ Long-running notes that should survive across sessions but don't belong in the f
 - [ ] S-meter calibration for RTL-SDR v3 vs v4 — measure on a known reference signal once we have receive working
 - [ ] WFM RDS — implement in M1 alongside WFM, or punt to M2? Re-decide after B6.
 - [x] Does Vite dev server respect `_headers`-style files, or do we need the explicit `server.headers` config? **Resolved (B1): Vite needs explicit `server.headers` — `_headers` is Cloudflare-only. Both are configured now.**
-- [ ] Confirm `webrtlsdr` Apache-2.0 license claim from the README — read `LICENSE` file once the dependency is in `package.json` (B3).
+- [x] Confirm `webrtlsdr` Apache-2.0 license claim. **Verified (B3): `web/node_modules/@jtarrio/webrtlsdr/LICENSE` is Apache-2.0, package.json confirms.**
+- [ ] **E4000 tuner is not supported by `@jtarrio/webrtlsdr`** (R820/828/860 only). Nooelec Smartee XTR users would need a separate driver path. Defer to v2 or never — author can use their SDR ADS-B (R820T2) dongle for now.
 - [ ] Track [wasm-pack#1442](https://github.com/rustwasm/wasm-pack/issues/1442) — once wasm-pack ships a newer bundled `wasm-opt`, re-enable wasm-opt in `dsp/Cargo.toml` for the ~5-10% size win.
 - [x] **Cargo's `-C` flag is unstable on stable Rust 1.95.** Use `(cd dsp && cargo ...)` everywhere. Documented in all agent docs.
 

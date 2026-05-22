@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@jtarrio/webrtlsdr':
+        specifier: ^3.0.6
+        version: 3.0.6
       lucide-svelte:
         specifier: ^1.0.1
         version: 1.0.1(svelte@5.55.9)
@@ -66,6 +69,12 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@jtarrio/signals@0.10.1':
+    resolution: {integrity: sha512-X6tJOugEATYH9KJy6j2feEBVCUmRv1U9SSbg9ITQZCx/Qruw2fE2zsS1HKH3yOsxrZBE+eQTGM+d0roX4xuDdw==}
+
+  '@jtarrio/webrtlsdr@3.0.6':
+    resolution: {integrity: sha512-+P8dsbXQ/6Mwru/vV613yHH68nHFyUJ9zPK68hE/Hh2F3jwyirUAjjBtIAfN/MlJbFioMJ3NS6dMGrRj9deFvw==}
 
   '@napi-rs/wasm-runtime@1.1.4':
     resolution: {integrity: sha512-3NQNNgA1YSlJb/kMH1ildASP9HW7/7kYnRI2szWJaofaS1hWmbGI4H+d3+22aGzXXN9IJ+n+GiFVcGipJP18ow==}
@@ -294,6 +303,9 @@ packages:
 
   '@types/trusted-types@2.0.7':
     resolution: {integrity: sha512-ScaPdn1dQczgbl0QFTeTOmVHFULt394XJgOQNoyVhZ6r2vLnMLJfBPd53SB52T/3G36VI1/g2MZaX0cwDuXsfw==}
+
+  '@types/w3c-web-usb@1.0.14':
+    resolution: {integrity: sha512-Qu3Nn6JFuF4+sHKYl+IcX9vYiI40ogleXzFFSxoE1W94rG98o/kXs8uJ0QSfFzuwBCZWlGfUGpPkgwuuX4PchA==}
 
   acorn@8.16.0:
     resolution: {integrity: sha512-UVJyE9MttOsBQIDKw1skb9nAwQuR5wuGD3+82K6JgJlm/Y+KI92oNsMNGZCYdDsVtRHSak0pcV5Dno5+4jh9sw==}
@@ -617,6 +629,13 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
+  '@jtarrio/signals@0.10.1': {}
+
+  '@jtarrio/webrtlsdr@3.0.6':
+    dependencies:
+      '@jtarrio/signals': 0.10.1
+      '@types/w3c-web-usb': 1.0.14
+
   '@napi-rs/wasm-runtime@1.1.4(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0)':
     dependencies:
       '@emnapi/core': 1.10.0
@@ -772,6 +791,8 @@ snapshots:
       undici-types: 7.16.0
 
   '@types/trusted-types@2.0.7': {}
+
+  '@types/w3c-web-usb@1.0.14': {}
 
   acorn@8.16.0: {}
 

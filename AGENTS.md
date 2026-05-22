@@ -74,7 +74,7 @@ Each phase ends with a tagged commit. Each milestone is roughly one PR.
 - [x] **B2** COOP/COEP headers (folded into B1 — set in both `vite.config.ts` and `web/public/_headers`)
 
 ### Phase 2 — M1 must-haves (weeks 1–9)
-- [ ] **B3** RTL-SDR v3/v4 WebUSB driver via `webrtlsdr`, raw IQ streaming over SharedArrayBuffer ring (PRD M1.1)
+- [x] **B3** RTL-SDR WebUSB driver via `@jtarrio/webrtlsdr` (Apache-2.0). Raw IQ flowing to a UI counter at 2.4 MS/s, 100 MHz center, AGC. SharedArrayBuffer ring deferred to B4 when DSP needs it.
 - [ ] **B4** DSP worker: RustFFT spectrum + Canvas 2D waterfall at 30 fps minimum (PRD M1.2, M1.4)
 - [ ] **B5** Tuning UI: keyboard hotkeys (`F`/`M`/`B`/`G`/etc.) + mouse/scroll + virtual VFO dial (PRD M1.5, M1.6)
 - [ ] **B6** Demods: WFM (mono+stereo), NFM, AM, SSB (USB/LSB via Weaver) (PRD M1.3)
@@ -145,10 +145,11 @@ These are non-negotiable. Violating any of them is a stop-the-line event.
 - B1a: cleanup + project identity (LICENSE, README, .gitignore, etc.)
 - B1c: scaffold `web/` (Svelte 5 + Vite + Tailwind 4 + lucide-svelte), `dsp/` (Cargo crate stub with `smoke()` export), `bridge/` (Go module + stub main.go)
 - B1d: four GitHub Actions workflows (ci, deploy, bridge-release, claude-review) + GoReleaser config
-**Currently working on:** B1 done. Ready for B3 (B2 folded into B1).
+**Currently working on:** B3 implementation complete. Ready for hardware verification.
 **Blocked by:** None.
-**Manual verification still pending (one-time, on author's machine):**
-- Run `pnpm -C web dev` and open http://localhost:5173. Confirm the page shows "DSP module ready — smoke test returned 42". WASM is now built end-to-end (Rust → wasm-pack → Vite bundle). Build verified: ~30 KB gzipped total.
+**Manual verification still pending (on author's machine, with an RTL-SDR Blog v3/v4 or equivalent R820T2 dongle):**
+- (Windows only) Run Zadig (https://zadig.akeo.ie/) and swap the dongle's driver to **WinUSB**. This breaks SDR++/SDR# usage of that specific dongle until you swap back — recommend using the SDR ADS-B dongle (R820T2) for browser tests and keeping the Nooelec Smartee XTR (E4000, unsupported by webrtlsdr anyway) on its native driver.
+- Open https://moshon-sdr.pages.dev (or `pnpm -C web dev`). Click "Connect RTL-SDR" → pick the dongle from the WebUSB picker → "Start streaming". You should see the "Received" counter tick up at roughly 2.40 MS/s.
 
 ## Agent behavior baseline
 
