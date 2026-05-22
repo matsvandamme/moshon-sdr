@@ -56,11 +56,22 @@ jobs:
       - name: Build web (prebuild hook runs wasm-pack)
         run: pnpm -C web build
 
+      # Wrangler 3 won't auto-create Pages projects. Create on first run;
+      # subsequent runs fail with "already exists" which we silence via
+      # continue-on-error. Cheap (~1 sec) and keeps the workflow self-bootstrapping.
+      - name: Ensure Cloudflare Pages project exists
+        continue-on-error: true
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages project create moshon-sdr --production-branch=main
+
       - name: Deploy to Cloudflare Pages
         id: deploy
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy web/dist --project-name=moshon-sdr
+          command: pages deploy web/dist --project-name=moshon-sdr --commit-dirty=true
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
