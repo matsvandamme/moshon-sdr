@@ -676,6 +676,89 @@ impl Default for SsbDemod {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// CW demodulator (B6d)
+// ──────────────────────────────────────────────────────────────────────────
+//
+// CW is essentially a narrow filter plus a fixed BFO offset: the user tunes
+// the dial so the keyed carrier zero-beats against the BFO frequency, which
+// produces an audible tone whenever the carrier is keyed on. We channelize
+// 2.4 MS/s → 240 kS/s → 48 kS/s with a narrow channel filter and then mix
+// the resulting complex baseband up by the BFO offset, taking Re{} for
+// audio.
+
+/// Default BFO offset (Hz). Comfortable mid-range pitch for most listeners.
+const CW_BFO_HZ: f32 = 700.0;
+/// Minimum bandwidth for the CW channel filter. Anything below 80 Hz mostly
+/// rings.
+const CW_BW_MIN: f32 = 80.0;
+/// Default CW bandwidth — fairly narrow but wide enough that high-speed
+/// morse keying doesn't get smeared by filter group delay.
+const CW_DEFAULT_BW: f32 = 500.0;
+
+#[wasm_bindgen]
+pub struct CwDemod {
+    iq_decim: ComplexDecimator,
+    chan_decim: ComplexDecimator,
+    bfo_phase: f32,
+    bfo_step: f32,
+    iq_in: Vec<Complex<f32>>,
+    iq_if: Vec<Complex<f32>>,
+    iq_chan: Vec<Complex<f32>>,
+}
+
+#[wasm_bindgen]
+impl CwDemod {
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new(bandwidth_hz: f32) -> CwDemod {
+        let bw = bandwidth_hz.clamp(CW_BW_MIN, NARROW_BW_MAX);
+        let stage1 = build_stage1_iq_taps();
+        // Narrow CW filtering wants a long FIR — 127 taps at a low cutoff
+        // gives a usable rolloff without becoming the dominant cost.
+        let stage2 = lowpass_taps(127, (bw / 2.0) / NARROW_IF_RATE);
+        let bfo_step = 2.0 * PI * CW_BFO_HZ / AUDIO_RATE;
+        CwDemod {
+            iq_decim: ComplexDecimator::new(NARROW_IF_DECIM, stage1),
+            chan_decim: ComplexDecimator::new(NARROW_AUDIO_DECIM, stage2),
+            bfo_phase: 0.0,
+            bfo_step,
+            iq_in: Vec::with_capacity(65_536),
+            iq_if: Vec::with_capacity(65_536 / NARROW_IF_DECIM + 16),
+            iq_chan: Vec::with_capacity(65_536 / (NARROW_IF_DECIM * NARROW_AUDIO_DECIM) + 16),
+        }
+    }
+
+    #[must_use]
+    pub fn process(&mut self, iq_bytes: &[u8]) -> Vec<f32> {
+        u8_iq_to_complex(iq_bytes, &mut self.iq_in);
+
+        self.iq_if.clear();
+        self.iq_decim.process(&self.iq_in, &mut self.iq_if);
+
+        self.iq_chan.clear();
+        self.chan_decim.process(&self.iq_if, &mut self.iq_chan);
+
+        let mut audio = Vec::with_capacity(self.iq_chan.len());
+        for &z in &self.iq_chan {
+            let (sin_p, cos_p) = self.bfo_phase.sin_cos();
+            // Re{z · e^(+j·ω_bfo·t)} = z.re·cos − z.im·sin.
+            audio.push(z.re * cos_p - z.im * sin_p);
+            self.bfo_phase += self.bfo_step;
+            if self.bfo_phase >= 2.0 * PI {
+                self.bfo_phase -= 2.0 * PI;
+            }
+        }
+        audio
+    }
+}
+
+impl Default for CwDemod {
+    fn default() -> Self {
+        Self::new(CW_DEFAULT_BW)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -916,6 +999,54 @@ mod tests {
         assert!(
             max_lsb < 0.5 * max_usb,
             "LSB suppression failed: USB max = {max_usb}, LSB max = {max_lsb}",
+        );
+    }
+
+    /// Synthesize a zero-beat carrier (constant complex value in baseband
+    /// IQ). The CW demod should produce a tone at the BFO offset (~700 Hz).
+    /// We verify by counting zero-crossings and comparing to the expected
+    /// rate for a 700 Hz sinusoid sampled at 48 kHz.
+    #[test]
+    fn cw_demod_makes_zero_beat_audible() {
+        let chunk_samples = 96_000usize;
+        let mut iq = vec![0u8; chunk_samples * 2];
+        // Constant carrier at DC: I = max amplitude, Q = 0.
+        let amp = 100.0_f32;
+        for n in 0..chunk_samples {
+            iq[2 * n] = f32_to_u8(amp + 127.5);
+            iq[2 * n + 1] = f32_to_u8(127.5);
+        }
+
+        let mut demod = CwDemod::new(500.0);
+        let _ = demod.process(&iq); // warm-up
+        let audio = demod.process(&iq);
+
+        let max = audio.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+        assert!(
+            max > 0.1,
+            "CW demod silent on zero-beat carrier (max = {max})"
+        );
+        assert!(max < 2.0, "CW demod overshoots (max = {max})");
+
+        // Count zero crossings. For a 700 Hz sinusoid sampled at 48 kHz
+        // over `audio.len()` samples we expect approximately
+        // 2 * 700 * audio.len() / 48000 crossings.
+        let audio_rate = 48_000.0_f32;
+        let bfo = 700.0_f32;
+        let expected_crossings = 2.0 * bfo * (audio.len() as f32) / audio_rate;
+
+        let mut crossings = 0usize;
+        for w in audio.windows(2) {
+            if (w[0] >= 0.0) != (w[1] >= 0.0) {
+                crossings += 1;
+            }
+        }
+        let crossings_f = crossings as f32;
+        // Allow ±20 % tolerance — DC bias, transients, and filter group
+        // delay can perturb the count.
+        assert!(
+            crossings_f > 0.8 * expected_crossings && crossings_f < 1.2 * expected_crossings,
+            "CW BFO frequency off: expected ~{expected_crossings} crossings, got {crossings}",
         );
     }
 }

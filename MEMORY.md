@@ -35,6 +35,15 @@ Long-running notes that should survive across sessions but don't belong in the f
 - NFM/AM/SSB/CW are mode-cycle UI only — actual demod lands in B6b–B6d.
 - Next milestone: **B6b** — NFM + AM demods (much simpler than WFM; single-stage envelope/quadrature demods on the existing channelizer chain).
 
+**As of B6d (all modes live — B6 complete):**
+- B6d shipped. `CwDemod` (Rust) gives CW its own demod path instead of the B6c fallback to narrow USB.
+- Implementation: 127-tap channel filter at `bandwidth/2` cutoff (default 500 Hz BW = ±250 Hz around DC), then a fixed 700 Hz BFO mixer that shifts the (real audio = `Re{z·e^(+jω_bfo·t)}`) so a zero-beat carrier in IQ becomes an audible 700 Hz tone.
+- Test pattern: synthesize a DC carrier in IQ, demod, count zero-crossings in the output. Expected crossings = `2·700·N/48000`, ±20% tolerance for transients.
+- BFO offset is fixed at 700 Hz for now. Future B7+ work could expose it as a user-tunable parameter for pitch preference, but most CW ops are happy with 600-800 Hz.
+- 127-tap filter at 240 kHz rate = ~30 M multiplies/sec for channel filtering. Well under budget for a single mode.
+- All PRD M1.3 modes are now shipped: WFM mono, NFM, AM, USB, LSB, CW. Stereo WFM stays deferred to M2.
+- Next milestone: **B7** — URL hash state + memory channels + IARU band overlay on spectrum + S-meter readout.
+
 **As of B6c (SSB live):**
 - B6c shipped. `SsbDemod` (Weaver method) handles both USB and LSB via a single struct with an `lsb: bool` constructor arg. Worker maps modes accordingly.
 - Weaver chain at 48 kHz: shift desired sideband to DC via complex NCO at ±BW/2 → real-coefficient LPF at BW/2 (kills image sideband) → shift back → take Re{} for audio.

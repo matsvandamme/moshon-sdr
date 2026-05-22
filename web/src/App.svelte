@@ -395,7 +395,7 @@
           <Keyboard size={12} />
           <span>?</span>
         </button>
-        <span class="font-mono text-xs text-neutral-500">B3 · B4 · B5 · B6c</span>
+        <span class="font-mono text-xs text-neutral-500">B3 · B4 · B5 · B6</span>
       </div>
     </header>
 
@@ -635,7 +635,7 @@
   </section>
 
   <p class="text-xs text-neutral-500 max-w-lg text-center">
-    Pre-alpha · B6c complete · Press <kbd class="font-mono text-neutral-300">?</kbd> for shortcuts.
+    Pre-alpha · B6 complete (all modes) · Press <kbd class="font-mono text-neutral-300">?</kbd> for shortcuts.
     <br />
     <a
       href="https://github.com/matsvandamme/moshon-sdr/blob/main/AGENTS.md"

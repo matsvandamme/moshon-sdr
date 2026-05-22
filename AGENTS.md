@@ -82,7 +82,8 @@ Each phase ends with a tagged commit. Each milestone is roughly one PR.
 - [x] **B6a** Audio pipeline + WFM mono demod: Rust `WfmDemod` (2.4 MS/s → 240 kS/s IF decimation → FM discriminator → 48 kS/s audio decimation, all with windowed-sinc FIRs); SAB-backed PCM ring; AudioWorklet (`web/public/audio-processor.js`); AudioContext at 48 kHz; volume slider + mute toggle (Space). NFM/AM/SSB/CW are mode-cycle UI only — actual demod for those lands in B6b–B6d. (PRD M1.3 partial)
 - [x] **B6b** NFM + AM demods: Rust `NfmDemod` (quadrature FM discriminator) and `AmDemod` (envelope detector + single-pole DC block) sharing a two-stage channelizer (2.4 MS/s → 240 kS/s wide LPF → 48 kS/s channel filter at `bandwidth/2`). DSP worker dispatches on `mode` via a `setMode` message; the UI's `M`/`B` hotkeys live-retune the demod without restarting the stream. SSB/CW still fall back to NFM until B6c–B6d. (PRD M1.3 partial)
 - [x] **B6c** SSB (USB + LSB) via Weaver's method: Rust `SsbDemod` shifts the desired sideband to DC, applies a real-coefficient LPF at `bandwidth/2` to kill the image sideband, then shifts back and takes the real part. Single struct with an `lsb: bool` constructor arg; worker maps `usb`/`lsb` modes to the two configurations. CW falls back to a narrow USB until B6d. (PRD M1.3 partial)
-- [ ] **B6** Demods: WFM (mono+stereo), NFM, AM, SSB (USB/LSB via Weaver) (PRD M1.3)
+- [x] **B6d** CW: Rust `CwDemod` — 127-tap narrow channel filter at `bandwidth/2` (default 500 Hz) and a fixed 700 Hz BFO mixer that turns the zero-beat carrier into an audible tone. Worker dispatches `cw` mode to the new demod. (PRD M1.3 complete) ✅
+- [x] **B6** Demods: WFM (mono+stereo), NFM, AM, SSB (USB/LSB via Weaver), CW (PRD M1.3) — stereo WFM deferred to M2.
 - [ ] **B7** URL hash state + memory channels + IARU band overlay + S-meter (PRD M1.7–M1.10)
 - [ ] **B8** First-run onboarding with per-OS WebUSB setup links (PRD M1.11)
 - [ ] **B9** Network IQ source: `rtl_tcp` over WebSocket bridge + Go bridge daemon released for 6 platforms (PRD M1.12, M1.13)
@@ -150,9 +151,9 @@ These are non-negotiable. Violating any of them is a stop-the-line event.
 - B1a: cleanup + project identity (LICENSE, README, .gitignore, etc.)
 - B1c: scaffold `web/` (Svelte 5 + Vite + Tailwind 4 + lucide-svelte), `dsp/` (Cargo crate stub with `smoke()` export), `bridge/` (Go module + stub main.go)
 - B1d: four GitHub Actions workflows (ci, deploy, bridge-release, claude-review) + GoReleaser config
-**Currently working on:** B6c shipped (SSB USB/LSB via Weaver). Ready for B6d (CW).
+**Currently working on:** B6 complete — all PRD M1.3 modes shipped (WFM, NFM, AM, USB, LSB, CW). Ready for B7 (URL hash state + memory channels + IARU bands + S-meter).
 **Blocked by:** None.
-**B6c hardware verification pending:** tune to a 40 m / 20 m amateur SSB band (e.g. 14.230 MHz USB, 7.150 MHz LSB), set mode to USB or LSB, voices should be intelligible without "donald duck". Confirm M-hotkey hot-swap between USB and LSB on the same signal flips sideband selectivity.
+**B6c+B6d hardware verification pending:** SSB on 14.230 MHz USB / 7.150 MHz LSB (voices intelligible). CW on a 14.020 MHz beacon (audible 700 Hz tone keyed on/off). Confirm M-hotkey cycles through all six modes while streaming without restart.
 
 ## Agent behavior baseline
 

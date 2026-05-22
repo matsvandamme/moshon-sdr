@@ -11,13 +11,12 @@
  *   - AM  (B6b)   — envelope detector, user-set bandwidth
  *   - USB (B6c)   — Weaver SSB, upper sideband
  *   - LSB (B6c)   — Weaver SSB, lower sideband
- *
- * CW lands in B6d. For now it falls back to USB at a narrow bandwidth so
- * users can still hear morse pitched against a BFO offset.
+ *   - CW  (B6d)   — narrow channel filter + 700 Hz BFO offset
  */
 
 import init, {
   AmDemod,
+  CwDemod,
   FftContext,
   NfmDemod,
   SsbDemod,
@@ -79,10 +78,9 @@ function buildDemod(mode: DemodMode, bandwidthHz: number): Demod {
     case 'lsb':
       return new SsbDemod(bandwidthHz, true);
     case 'cw':
+      return new CwDemod(bandwidthHz);
     default:
-      // CW lands in B6d. For now treat it as a narrow USB so morse audio
-      // is still pitched against the tuned offset.
-      return new SsbDemod(Math.max(500, bandwidthHz), false);
+      return new WfmDemod();
   }
 }
 
