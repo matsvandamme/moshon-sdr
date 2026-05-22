@@ -59,6 +59,12 @@
   let rafHandle = 0;
   let unsubStats: (() => void) | null = null;
   let unsubFft: (() => void) | null = null;
+  let unsubAudio: (() => void) | null = null;
+
+  let audioSamplesPlayed = $state(0);
+  let audioUnderrun = $state(0);
+  let audioRingUsed = $state(0);
+  let audioWorkletReady = $state(false);
 
   let helpOpen = $state(false);
   let freqEntryOpen = $state(false);
@@ -156,6 +162,14 @@
       audio.setVolume(volume);
       audio.setMuted(tuning.muted);
 
+      unsubAudio?.();
+      unsubAudio = audio.onStats((s) => {
+        audioSamplesPlayed = s.samplesPlayed;
+        audioUnderrun = s.samplesUnderrun;
+        audioRingUsed = s.ringUsedBytes;
+        audioWorkletReady = audio.isWorkletReady;
+      });
+
       rtlStatus = 'streaming';
       await source.start({
         sampleRate: SAMPLE_RATE,
@@ -171,8 +185,10 @@
       cancelAnimationFrame(rafHandle);
       unsubStats?.();
       unsubFft?.();
+      unsubAudio?.();
       unsubStats = null;
       unsubFft = null;
+      unsubAudio = null;
     }
   }
 
@@ -189,8 +205,10 @@
     } finally {
       unsubStats?.();
       unsubFft?.();
+      unsubAudio?.();
       unsubStats = null;
       unsubFft = null;
+      unsubAudio = null;
     }
   }
 
@@ -495,18 +513,14 @@
 
       {#if rtlStatus === 'streaming' || (rtlStatus === 'closing' && bytesWritten > 0)}
         <dl
-          class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-4 rounded-md border border-neutral-800 bg-neutral-900 p-3 font-mono text-xs"
+          class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-2 rounded-md border border-neutral-800 bg-neutral-900 p-3 font-mono text-xs"
         >
           <div>
-            <dt class="text-neutral-500">Received</dt>
-            <dd class="text-(--color-accent) text-sm">{formatMSamples(samplesTotal)}</dd>
-          </div>
-          <div>
             <dt class="text-neutral-500">USB rate</dt>
-            <dd class="text-neutral-200 text-sm">{rateMSps.toFixed(2)} MS/s</dd>
+            <dd class="text-(--color-accent) text-sm">{rateMSps.toFixed(2)} MS/s</dd>
           </div>
           <div>
-            <dt class="text-neutral-500">Render</dt>
+            <dt class="text-neutral-500">Spectrum</dt>
             <dd class="text-neutral-200 text-sm">{renderFps.toFixed(1)} fps</dd>
           </div>
           <div>
@@ -514,8 +528,36 @@
             <dd class="text-neutral-200 text-sm">{(elapsedMs / 1000).toFixed(1)} s</dd>
           </div>
           <div>
-            <dt class="text-neutral-500">Dropped</dt>
+            <dt class="text-neutral-500">USB drop</dt>
             <dd class="text-neutral-200 text-sm">{bytesDropped} B</dd>
+          </div>
+        </dl>
+        <!-- Audio telemetry: lets us see whether the demod-to-speaker chain
+             is actually alive. If "played" is 0 the worklet isn't running;
+             if "ring" stays at 0 the DSP worker isn't writing; if "ring"
+             grows without bound the worklet isn't reading. -->
+        <dl
+          class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4 rounded-md border border-neutral-800 bg-neutral-900 p-3 font-mono text-xs"
+        >
+          <div>
+            <dt class="text-neutral-500">Audio</dt>
+            <dd class="text-sm" class:text-emerald-400={audioWorkletReady} class:text-amber-400={!audioWorkletReady}>
+              {audioWorkletReady ? 'worklet ready' : 'waiting'}
+            </dd>
+          </div>
+          <div>
+            <dt class="text-neutral-500">Played</dt>
+            <dd class="text-(--color-accent) text-sm">{formatMSamples(audioSamplesPlayed)}</dd>
+          </div>
+          <div>
+            <dt class="text-neutral-500">Ring</dt>
+            <dd class="text-neutral-200 text-sm">{Math.round(audioRingUsed / 4)} S</dd>
+          </div>
+          <div>
+            <dt class="text-neutral-500">Underrun</dt>
+            <dd class="text-neutral-200 text-sm" class:text-amber-400={audioUnderrun > 100}>
+              {formatMSamples(audioUnderrun)}
+            </dd>
           </div>
         </dl>
       {/if}

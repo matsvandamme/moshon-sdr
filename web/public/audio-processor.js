@@ -33,6 +33,12 @@ class PcmRingPlayer extends AudioWorkletProcessor {
     this.volume = 1;
     this.muted = false;
 
+    // Telemetry — surface to main so the UI can show whether the audio
+    // pipeline is alive. Posted ~every 100 ms.
+    this.samplesPlayed = 0;
+    this.samplesUnderrun = 0;
+    this.lastStatsPost = currentTime;
+
     this.port.onmessage = (e) => {
       const m = e.data;
       if (m && typeof m === 'object') {
@@ -40,6 +46,9 @@ class PcmRingPlayer extends AudioWorkletProcessor {
         if (typeof m.muted === 'boolean') this.muted = m.muted;
       }
     };
+
+    // Tell main we're alive. processorOptions arrived intact, ring is wired.
+    this.port.postMessage({ kind: 'ready', capacityBytes: this.capacityBytes });
   }
 
   process(_inputs, outputs) {
@@ -78,6 +87,19 @@ class PcmRingPlayer extends AudioWorkletProcessor {
     // Underrun — pad rest of buffer with silence.
     for (let i = takeSamples; i < wantSamples; i++) {
       out[i] = 0;
+    }
+
+    // Telemetry
+    this.samplesPlayed += takeSamples;
+    this.samplesUnderrun += wantSamples - takeSamples;
+    if (currentTime - this.lastStatsPost >= 0.1) {
+      this.lastStatsPost = currentTime;
+      this.port.postMessage({
+        kind: 'stats',
+        samplesPlayed: this.samplesPlayed,
+        samplesUnderrun: this.samplesUnderrun,
+        ringUsedBytes: (w - r + this.modBytes) % this.modBytes,
+      });
     }
 
     return true;
