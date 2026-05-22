@@ -145,11 +145,10 @@ These are non-negotiable. Violating any of them is a stop-the-line event.
 - B1a: cleanup + project identity (LICENSE, README, .gitignore, etc.)
 - B1c: scaffold `web/` (Svelte 5 + Vite + Tailwind 4 + lucide-svelte), `dsp/` (Cargo crate stub with `smoke()` export), `bridge/` (Go module + stub main.go)
 - B1d: four GitHub Actions workflows (ci, deploy, bridge-release, claude-review) + GoReleaser config
-**Currently working on:** B3 implementation complete. Ready for hardware verification.
+**Currently working on:** B4a complete (USB I/O moved to a Worker). Ready for B4b (RustFFT spectrum + Canvas 2D waterfall).
 **Blocked by:** None.
-**Manual verification still pending (on author's machine, with an RTL-SDR Blog v3/v4 or equivalent R820T2 dongle):**
-- (Windows only) Run Zadig (https://zadig.akeo.ie/) and swap the dongle's driver to **WinUSB**. This breaks SDR++/SDR# usage of that specific dongle until you swap back — recommend using the SDR ADS-B dongle (R820T2) for browser tests and keeping the Nooelec Smartee XTR (E4000, unsupported by webrtlsdr anyway) on its native driver.
-- Open https://moshon-sdr.pages.dev (or `pnpm -C web dev`). Click "Connect RTL-SDR" → pick the dongle from the WebUSB picker → "Start streaming". You should see the "Received" counter tick up at roughly 2.40 MS/s.
+**B3 verified on author's hardware** at https://moshon-sdr.pages.dev — Received 81.79 MS @ ~2.18 MS/s on first test (Zadig'd SDR ADS-B dongle). Rate < target attributed to main-thread USB-vs-UI contention; B4a addresses this by moving the read loop to a Web Worker.
+**Next manual verification (after B4a deploys):** click Connect → Start. Expect rate closer to 2.40 MS/s now that the read loop is off the main thread.
 
 ## Agent behavior baseline
 

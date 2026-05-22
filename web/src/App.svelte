@@ -31,6 +31,7 @@
   let streamStartMs = $state<number | null>(null); // timestamp of stream start
   let elapsedMs = $state(0); // ticked from rAF for live display
   let rafHandle = 0;
+  let unsubscribeSamples: (() => void) | null = null;
 
   onMount(async () => {
     try {
@@ -73,8 +74,9 @@
     streamStartMs = performance.now();
     elapsedMs = 0;
 
-    source.onSamples((block) => {
-      samplesTotal += block.data.byteLength / BYTES_PER_SAMPLE;
+    unsubscribeSamples?.();
+    unsubscribeSamples = source.onSamples((evt) => {
+      samplesTotal += evt.data.byteLength / BYTES_PER_SAMPLE;
     });
 
     rafHandle = requestAnimationFrame(tickElapsed);
@@ -89,6 +91,9 @@
     } catch (err) {
       rtlStatus = 'error';
       rtlError = err instanceof Error ? err.message : String(err);
+      unsubscribeSamples?.();
+      unsubscribeSamples = null;
+      cancelAnimationFrame(rafHandle);
     }
   }
 
@@ -97,15 +102,23 @@
     rtlStatus = 'closing';
     try {
       await source.stop();
-      rtlStatus = 'connected';
+      // After stop, the device stays open but the worker no longer holds a
+      // reference we can re-use. Treat stop+restart as a full re-connect.
+      await source.disconnect();
+      rtlStatus = 'idle';
     } catch (err) {
       rtlStatus = 'error';
       rtlError = err instanceof Error ? err.message : String(err);
+    } finally {
+      unsubscribeSamples?.();
+      unsubscribeSamples = null;
     }
   }
 
   async function onDisconnect() {
     cancelAnimationFrame(rafHandle);
+    unsubscribeSamples?.();
+    unsubscribeSamples = null;
     rtlStatus = 'closing';
     try {
       await source.disconnect();

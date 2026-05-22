@@ -1,115 +1,176 @@
 /**
- * Thin wrapper around @jtarrio/webrtlsdr that gives us a stable internal
- * API for B3+ milestones. Keeps the rest of the app insulated from the
- * underlying library so we can swap implementations (or add a mock source)
- * without churning UI code.
+ * Main-thread API for an RTL-SDR source. Spawns a Web Worker (see
+ * usb-worker.ts) that owns the USBDevice and runs the readSamples loop
+ * off-main-thread. The main thread only receives sample chunks via
+ * postMessage and dispatches them to listeners.
  *
- * Apache-2.0 dependency, MIT-compatible.
+ * navigator.usb.requestDevice() must happen on the main thread inside a
+ * user-gesture handler (Workers cannot trigger it), so connect() runs there
+ * and transfers the USBDevice to the worker on start().
+ *
+ * Underlying driver: @jtarrio/webrtlsdr (Apache-2.0), MIT-compatible.
  */
 
-import { RTL2832U_Provider, type RtlDevice, type SampleBlock } from '@jtarrio/webrtlsdr/rtlsdr.js';
+/** USB vendor/product IDs of RTL2832U-class devices. Mirrors webrtlsdr's TUNERS. */
+const RTL2832U_FILTERS: USBDeviceFilter[] = [
+  { vendorId: 0x0bda, productId: 0x2832 },
+  { vendorId: 0x0bda, productId: 0x2838 },
+];
+
+const DEFAULT_CHUNK_SAMPLES = 65_536;
 
 export type RtlSdrStatus = 'idle' | 'connecting' | 'connected' | 'streaming' | 'closing' | 'error';
 
 export type StreamOptions = {
-  /** Samples per second. Typical RTL-SDR values: 240k, 1.024M, 1.4M, 1.8M, 2.048M, 2.4M, 2.56M, 2.88M, 3.2M. */
   sampleRate: number;
-  /** Center frequency in Hz. */
   centerFreq: number;
-  /** Tuner gain in dB, or `null` for automatic gain control (AGC). */
   gain: number | null;
 };
 
-export type SamplesCallback = (block: SampleBlock) => void;
+export type SampleEvent = {
+  /** Raw IQ samples — sequence of (U8, U8) pairs (I then Q). */
+  data: ArrayBuffer;
+  /** Tuned frequency when these samples were captured (Hz). */
+  frequency: number;
+  directSampling: boolean;
+};
 
-const READ_CHUNK_SAMPLES = 65_536;
+export type SamplesCallback = (evt: SampleEvent) => void;
 
-/**
- * Wraps a single RTL-SDR device. Lifecycle: idle → connecting → connected
- * → streaming → connected (after stop) → closing → idle (after disconnect).
- *
- * connect() must be called from a user-gesture handler (e.g. button click)
- * because it triggers `navigator.usb.requestDevice()` which is gated by the
- * browser to require user activation.
- */
+type WorkerOutboundStarted = {
+  kind: 'started';
+  actualSampleRate: number;
+  actualFrequency: number;
+};
+type WorkerOutboundSamples = {
+  kind: 'samples';
+  data: ArrayBuffer;
+  frequency: number;
+  directSampling: boolean;
+};
+type WorkerOutboundStopped = { kind: 'stopped' };
+type WorkerOutboundError = { kind: 'error'; message: string };
+type WorkerOutbound =
+  | WorkerOutboundStarted
+  | WorkerOutboundSamples
+  | WorkerOutboundStopped
+  | WorkerOutboundError;
+
 export class RtlSdrSource {
-  private provider = new RTL2832U_Provider();
-  private device: RtlDevice | null = null;
-  private running = false;
+  private worker: Worker | null = null;
+  private device: USBDevice | null = null;
   private listeners = new Set<SamplesCallback>();
-  private loopPromise: Promise<void> | null = null;
+  /** Resolved when the worker confirms it started streaming, or rejected on error. */
+  private startResolver: { resolve: () => void; reject: (err: Error) => void } | null = null;
+  private stopResolver: { resolve: () => void } | null = null;
 
-  /** Opens a device. Must be called inside a user-gesture handler. */
+  /**
+   * Opens a device. Must be called inside a user-gesture handler (button click).
+   * Shows the WebUSB device picker and stores the user's selection.
+   */
   async connect(): Promise<void> {
     if (this.device) return;
-    this.device = await this.provider.get();
+    if (!('usb' in navigator)) {
+      throw new Error('WebUSB is not available in this browser. Use Chrome, Edge, or Brave.');
+    }
+    this.device = await navigator.usb.requestDevice({ filters: RTL2832U_FILTERS });
   }
 
-  /** Configures the device and begins streaming samples. */
+  /** Spawns the USB worker (if needed), transfers the device, and starts streaming. */
   async start(opts: StreamOptions): Promise<void> {
     if (!this.device) throw new Error('connect() before start()');
-    if (this.running) return;
 
-    await this.device.setSampleRate(opts.sampleRate);
-    await this.device.setCenterFrequency(opts.centerFreq);
-    await this.device.setGain(opts.gain);
-    await this.device.resetBuffer();
+    if (!this.worker) {
+      this.worker = new Worker(new URL('../../workers/usb-worker.ts', import.meta.url), {
+        type: 'module',
+      });
+      this.worker.onmessage = (e: MessageEvent<WorkerOutbound>) => this.handleMessage(e.data);
+      this.worker.onerror = (e) => {
+        this.startResolver?.reject(new Error(e.message || 'USB worker crashed'));
+        this.startResolver = null;
+      };
+    }
 
-    this.running = true;
-    this.loopPromise = this.readLoop();
+    const startPromise = new Promise<void>((resolve, reject) => {
+      this.startResolver = { resolve, reject };
+    });
+
+    // USBDevice is transferable. Once this postMessage returns, the device
+    // is detached on this side; we null it out to avoid accidental reuse.
+    this.worker.postMessage(
+      {
+        kind: 'init',
+        device: this.device,
+        sampleRate: opts.sampleRate,
+        centerFreq: opts.centerFreq,
+        gain: opts.gain,
+        chunkSamples: DEFAULT_CHUNK_SAMPLES,
+      },
+      [this.device],
+    );
+    this.device = null;
+
+    return startPromise;
   }
 
-  /** Stops the streaming loop. Does NOT close the device — call disconnect() for that. */
+  /** Asks the worker to stop streaming. Device remains open until disconnect(). */
   async stop(): Promise<void> {
-    if (!this.running) return;
-    this.running = false;
-    if (this.loopPromise) {
-      try {
-        await this.loopPromise;
-      } finally {
-        this.loopPromise = null;
-      }
-    }
+    if (!this.worker) return;
+    const stopPromise = new Promise<void>((resolve) => {
+      this.stopResolver = { resolve };
+    });
+    this.worker.postMessage({ kind: 'stop' });
+    return stopPromise;
   }
 
-  /** Stops streaming if needed, then releases the device. */
+  /** Stops streaming, closes the device, and terminates the worker. */
   async disconnect(): Promise<void> {
-    await this.stop();
-    if (this.device) {
-      try {
-        await this.device.close();
-      } finally {
-        this.device = null;
-      }
+    if (this.worker) {
+      this.worker.postMessage({ kind: 'close' });
+      this.worker.terminate();
+      this.worker = null;
     }
+    this.device = null;
+    this.startResolver = null;
+    this.stopResolver = null;
   }
 
-  /** Subscribe to sample blocks. Returns an unsubscribe function. */
+  /** Subscribe to sample chunks. Returns an unsubscribe function. */
   onSamples(cb: SamplesCallback): () => void {
     this.listeners.add(cb);
-    return () => this.listeners.delete(cb);
+    return () => {
+      this.listeners.delete(cb);
+    };
   }
 
-  get isConnected(): boolean {
-    return this.device !== null;
-  }
-
-  get isStreaming(): boolean {
-    return this.running;
-  }
-
-  private async readLoop(): Promise<void> {
-    while (this.running && this.device) {
-      let block: SampleBlock;
-      try {
-        block = await this.device.readSamples(READ_CHUNK_SAMPLES);
-      } catch (err) {
-        // Device unplugged, USB error, etc. Surface via an empty notify; the
-        // UI sets its own error state by observing isStreaming flipping.
-        this.running = false;
-        throw err;
+  private handleMessage(msg: WorkerOutbound) {
+    switch (msg.kind) {
+      case 'started':
+        this.startResolver?.resolve();
+        this.startResolver = null;
+        break;
+      case 'samples':
+        for (const listener of this.listeners) {
+          listener({
+            data: msg.data,
+            frequency: msg.frequency,
+            directSampling: msg.directSampling,
+          });
+        }
+        break;
+      case 'stopped':
+        this.stopResolver?.resolve();
+        this.stopResolver = null;
+        break;
+      case 'error': {
+        const err = new Error(msg.message);
+        this.startResolver?.reject(err);
+        this.startResolver = null;
+        // No clean way to surface mid-stream errors from here; the listener-
+        // less API means UIs poll for state. B4b will revisit when there's
+        // more to react to.
+        break;
       }
-      for (const listener of this.listeners) listener(block);
     }
   }
 }

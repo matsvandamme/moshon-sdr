@@ -27,6 +27,9 @@ importers:
       '@types/node':
         specifier: ^24.12.3
         version: 24.12.4
+      '@types/w3c-web-usb':
+        specifier: ^1.0.14
+        version: 1.0.14
       svelte:
         specifier: ^5.55.5
         version: 5.55.9
