@@ -11,8 +11,9 @@ entry, memory channels, IARU band overlays, S-meter, and two equally
 first-class input paths — **local USB dongle (WebUSB)** and **remote network
 IQ (`rtl_tcp` over WebSocket bridge)**.
 
-**Status:** Pre-alpha. The MVP (v0.1.0) is feature-complete; awaiting on-air
-verification.
+**Status:** Pre-alpha. The MVP (v0.1.0) is feature-complete. Post-v0.1.0
+shipping continues on `main` with the M2 backlog (stereo WFM ✅, recording ✅,
+mobile audit ✅, CW decoder ✅, RDS / HackRF / ADS-B next).
 
 ## Why another SDR receiver?
 
@@ -145,8 +146,23 @@ wheel for fine-tune at the current step size; click-drag the virtual VFO dial.
 
 ## Demodulation modes
 
-WFM mono, Narrow FM, AM, USB, LSB (both via Weaver's method), CW (700 Hz
-BFO with narrow channel filter). Stereo WFM + ADS-B + RDS land in M2.
+WFM mono **and stereo** (with 19 kHz pilot detection + coherent 38 kHz L-R
+demod + 50 µs de-emphasis), Narrow FM, AM, USB, LSB (both via Weaver's
+method), CW (700 Hz BFO with narrow channel filter). ADS-B + RDS land
+later in M2.
+
+## Extras shipped beyond the MVP
+
+- **Stereo WFM** — automatic pilot detection, dynamic L-R gain normalisation.
+- **Audio recording** — one click captures the demodulated audio (pre-volume)
+  to a 16-bit PCM WAV with a frequency-and-mode filename. Caps at 5 minutes
+  so the browser tab stays responsive.
+- **Live CW decoder** — when in CW mode, decoded morse appears under the
+  spectrum with an adaptive-WPM readout. The decoder self-calibrates dit
+  length from observed signals (clamped between 5 and 40 WPM).
+- **Mobile-responsive** — the UI rearranges on narrow viewports; the VFO
+  dial works with touch (drag horizontally to fine-tune); the memory-channel
+  delete button stays visible on touch (no hover-reveal).
 
 ## Browser requirements
 
