@@ -200,7 +200,7 @@
         <dt class="text-neutral-500">Center frequency</dt>
         <dd class="text-neutral-200">{formatHz(CENTER_FREQ)}</dd>
         <dt class="text-neutral-500">Sample rate</dt>
-        <dd class="text-neutral-200">{formatHz(SAMPLE_RATE)}/s</dd>
+        <dd class="text-neutral-200">{(SAMPLE_RATE / 1e6).toFixed(3)} MS/s</dd>
         <dt class="text-neutral-500">Gain</dt>
         <dd class="text-neutral-200">AGC</dd>
       </dl>
