@@ -37,8 +37,9 @@ pnpm -C web run lint
 pnpm -C web run test
 pnpm -C web run test:e2e     # Playwright
 
-# DSP (Rust) — cargo's -C flag is unstable; cd into dsp/ first
-cd dsp; cargo test; cargo clippy -- -D warnings; cd ..
+# DSP (Rust) — cargo's -C flag is unstable; cd into dsp/ first.
+# These three commands MUST all be green before pushing — they match CI.
+cd dsp; cargo fmt -- --check; cargo clippy --all-targets -- -D warnings; cargo test; cd ..
 
 # Bridge (Go) — Go's -C is stable
 go -C bridge test ./...
@@ -58,7 +59,7 @@ For single-file or typo changes, plan is implicit.
 ## Style notes
 
 - TypeScript strict, no `any`. Use `unknown` and narrow.
-- Rust: `#![deny(clippy::pedantic)]` aspirational; at minimum `clippy -- -D warnings` must pass.
+- Rust: `#![warn(clippy::pedantic)]` aspirational; at minimum `cargo clippy --all-targets -- -D warnings` and `cargo fmt -- --check` must pass.
 - Go: `gofmt` + `go vet`; idiomatic standard library where possible (no needless deps).
 - Svelte 5 runes (`$state`, `$derived`, `$effect`) over legacy stores where it's cleaner.
 - Tailwind 4 utility classes. No CSS-in-JS.

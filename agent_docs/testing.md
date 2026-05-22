@@ -130,7 +130,7 @@ The `window.__moshon_perf` probe is dev-mode-only and gated behind a Vite flag.
 5. `pnpm -C web run lint`
 6. `pnpm -C web run test`
 7. `(cd dsp && cargo test)`
-8. `(cd dsp && cargo clippy -- -D warnings)`
+8. `(cd dsp && cargo clippy --all-targets -- -D warnings)` + `(cd dsp && cargo fmt -- --check)`
 9. If `bridge/**` changed: `cd bridge && go test ./... && go vet ./...`
 10. (Linux only) `pnpm -C web run test:e2e`
 

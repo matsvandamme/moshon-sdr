@@ -97,7 +97,7 @@ moshon-sdr/
 ## Rust (DSP)
 
 - `#![forbid(unsafe_code)]` in `lib.rs`, lift selectively where SAB requires it.
-- `clippy -- -D warnings` is the floor; `clippy::pedantic` aspirational.
+- `cargo clippy --all-targets -- -D warnings` (with `--all-targets` — that's what CI does) and `cargo fmt -- --check` are the floor; `clippy::pedantic` aspirational. Without `--all-targets`, test code escapes clippy locally even though CI catches it.
 - No `unwrap` on input data; use `?` with a typed error (`thiserror`).
 - Allocations during hot DSP loop are a perf bug — preallocate, reuse.
 - Public WASM-exposed functions:

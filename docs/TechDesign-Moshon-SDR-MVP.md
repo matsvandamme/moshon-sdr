@@ -462,7 +462,7 @@ Generated in step 4 (`/vibe-agents`). Will codify:
   8. `pnpm -C web run lint`
   9. `pnpm -C web run test` (Vitest)
   10. `(cd dsp && cargo test)`
-  11. `(cd dsp && cargo clippy -- -D warnings)`
+  11. `(cd dsp && cargo clippy --all-targets -- -D warnings)` + `(cd dsp && cargo fmt -- --check)`
   12. If `bridge/**` changed: `cd bridge && go test ./... && go vet ./...`
   13. Playwright e2e against the `pnpm dev` server (Linux only)
 

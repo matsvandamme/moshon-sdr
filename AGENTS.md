@@ -41,10 +41,11 @@ pnpm -C web run check            # svelte-check + tsc
 pnpm -C web run lint
 pnpm -C web run test             # Vitest
 
-# DSP crate (Rust) — run from inside dsp/
+# DSP crate (Rust) — run from inside dsp/. Mirror what CI does.
 cd dsp
+cargo fmt -- --check
+cargo clippy --all-targets -- -D warnings
 cargo test
-cargo clippy -- -D warnings
 cd ..
 
 # Bridge daemon (Go) — Go's -C flag is stable

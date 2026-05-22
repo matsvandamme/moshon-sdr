@@ -123,9 +123,20 @@ fn hann_window(size: usize) -> Vec<f32> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
 mod tests {
     use super::*;
     use std::f32::consts::PI;
+
+    /// f32 -> u8 with explicit clamping. Used only by the test below to build
+    /// synthetic 8-bit IQ; we know the inputs stay inside [0, 255].
+    fn f32_to_u8(x: f32) -> u8 {
+        x.round().clamp(0.0, 255.0) as u8
+    }
 
     #[test]
     fn smoke_returns_known_value() {
@@ -135,12 +146,12 @@ mod tests {
     #[test]
     fn fft_recovers_tone_at_known_bin() {
         // Generate a 1/8-sample-rate complex tone (so bin = size/8 from DC).
-        let size = 1024;
+        let size = 1024usize;
         let mut iq = vec![0u8; size * 2];
         for i in 0..size {
             let phase = 2.0 * PI * (i as f32) / 8.0;
-            iq[2 * i] = ((phase.cos() * 100.0) + 127.5) as u8;
-            iq[2 * i + 1] = ((phase.sin() * 100.0) + 127.5) as u8;
+            iq[2 * i] = f32_to_u8((phase.cos() * 100.0) + 127.5);
+            iq[2 * i + 1] = f32_to_u8((phase.sin() * 100.0) + 127.5);
         }
 
         let mut ctx = FftContext::new(size);
@@ -153,7 +164,7 @@ mod tests {
         let (peak_idx, peak_val) =
             bins.iter()
                 .enumerate()
-                .fold((0, f32::NEG_INFINITY), |(bi, bv), (i, v)| {
+                .fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, v)| {
                     if *v > bv {
                         (i, *v)
                     } else {
@@ -162,8 +173,9 @@ mod tests {
                 });
 
         // Window leakage may shift the peak by 1 bin; allow ±2 bins.
+        // abs_diff avoids the lossy usize->isize cast clippy flags.
         assert!(
-            (peak_idx as isize - expected as isize).abs() <= 2,
+            peak_idx.abs_diff(expected) <= 2,
             "expected peak near bin {expected}, got {peak_idx} (value {peak_val} dB)",
         );
     }
