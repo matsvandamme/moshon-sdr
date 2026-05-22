@@ -19,6 +19,8 @@ Cargo.lock        # libraries don't commit lockfiles; we'll commit when we ship 
 
 # Go
 bridge/dist/
+bridge/bridge
+bridge/bridge.exe
 bridge/moshon-bridge
 bridge/moshon-bridge.exe
 *.test

@@ -1,0 +1,71 @@
+name: Deploy web to Cloudflare Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'dsp/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+# Requires the following repository secrets to be configured before this
+# workflow can succeed:
+#   CLOUDFLARE_API_TOKEN  — token with "Pages: Edit" permission
+#   CLOUDFLARE_ACCOUNT_ID — your Cloudflare account ID
+# The Pages project name below must match the project created in Cloudflare.
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment:
+      name: cloudflare-pages
+      url: ${{ steps.deploy.outputs.deployment-url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dsp -> target
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Build WASM
+        run: |
+          # TODO(B3/B4): replace with `pnpm -C web run wasm:build` once that
+          # script orchestrates the wasm-pack invocation and output copy.
+          wasm-pack build dsp --target web --release --out-dir ../web/src/lib/dsp/wasm
+
+      - name: Install web dependencies
+        run: pnpm -C web install --frozen-lockfile
+
+      - name: Build web
+        run: pnpm -C web build
+
+      - name: Deploy to Cloudflare Pages
+        id: deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy web/dist --project-name=moshon-sdr
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}

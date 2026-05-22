@@ -137,10 +137,17 @@ These are non-negotiable. Violating any of them is a stop-the-line event.
 ## Current state
 
 **Last updated:** 2026-05-22
-**Workflow phase:** End of Step 4 (Agent Config). Step 5 (Build MVP) starts next.
-**Completed:** Research, PRD, Tech Design, repo on GitHub at https://github.com/matsvandamme/moshon-sdr (private).
-**Currently working on:** Nothing. Ready for B1.
-**Blocked by:** None.
+**Workflow phase:** Step 5 (Build) — milestone B1 in progress.
+**Completed:**
+- Research, PRD, Tech Design committed
+- B1a: cleanup + project identity (LICENSE, README, .gitignore, etc.)
+- B1c: scaffold `web/` (Svelte 5 + Vite + Tailwind 4 + lucide-svelte), `dsp/` (Cargo crate stub with `smoke()` export), `bridge/` (Go module + stub main.go)
+- B1d: four GitHub Actions workflows (ci, deploy, bridge-release, claude-review) + GoReleaser config
+**Currently working on:** B1 final verification.
+**Blocked by:** Visual Studio Build Tools install in progress on author's Windows machine (needed for `cargo install wasm-pack` → wires `dsp/` into the web build). Web smoke test (page loads + placeholder "DSP module ready" message) works without it.
+**Manual verification still needed:**
+- Run `pnpm -C web dev` and open the dev server; confirm the smoke test page shows "DSP module ready — smoke test returned 42"
+- Once wasm-pack is installed: replace `web/src/lib/dsp/wasm-placeholder.ts` with real WASM bindings (deferred to B3/B4)
 
 ## Agent behavior baseline
 
