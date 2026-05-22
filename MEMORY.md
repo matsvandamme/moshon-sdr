@@ -35,6 +35,12 @@ Long-running notes that should survive across sessions but don't belong in the f
 - NFM/AM/SSB/CW are mode-cycle UI only — actual demod lands in B6b–B6d.
 - Next milestone: **B6b** — NFM + AM demods (much simpler than WFM; single-stage envelope/quadrature demods on the existing channelizer chain).
 
+**As of B8 (first-run onboarding):**
+- B8 shipped. `Onboarding.svelte` is a modal with three tabs (Windows/macOS/Linux). Default tab picked from `navigator.userAgent`. Dismissal persists in `localStorage` under `moshon.onboarding.dismissed.v1`.
+- Auto-opens on first visit; header "Setup" button re-opens it.
+- Windows tab walks through Zadig (driver swap to WinUSB on Interface 0). Linux tab gives the udev rule + plugdev group steps. macOS tab points users at Chrome/Edge/Brave (Safari has no WebUSB) and the picker.
+- Next milestone: **B9** — network IQ via `rtl_tcp` over WebSocket + Go bridge daemon. First time we ship anything outside the browser.
+
 **As of B7 (URL hash + channels + bands + S-meter):**
 - URL hash state in [web/src/lib/state/url-hash.ts](web/src/lib/state/url-hash.ts). Format `#f=145300000&m=nfm&bw=12500&g=AGC`. Reads in `onMount` (mode → bandwidth → centerFreq → gain, in that order so the mode setter doesn't clobber the others). Writes via `history.replaceState` from a `$effect` (no back-stack pollution while dragging).
 - **Hash never carries bridge URL** — privacy rule from decisions log. Only tuning state.

@@ -11,6 +11,7 @@
     Keyboard,
     Volume2,
     VolumeX,
+    HelpCircle,
   } from 'lucide-svelte';
   import { onMount, onDestroy } from 'svelte';
   import init, { smoke } from './lib/dsp/wasm/moshon_dsp.js';
@@ -27,6 +28,7 @@
   import VfoDial from './lib/ui/VfoDial.svelte';
   import SpectrumWaterfall from './lib/ui/SpectrumWaterfall.svelte';
   import MemoryChannels from './lib/ui/MemoryChannels.svelte';
+  import Onboarding from './lib/ui/Onboarding.svelte';
   import { AudioPipeline } from './lib/audio/audio-pipeline';
   import { readHash, writeHash } from './lib/state/url-hash';
   import { peakDbInChannel, dbToSUnit } from './lib/dsp/smeter';
@@ -71,10 +73,22 @@
 
   let helpOpen = $state(false);
   let freqEntryOpen = $state(false);
+  let onboardingOpen = $state(false);
 
   // ---- Lifecycle ----
 
   onMount(async () => {
+    // First-run onboarding: auto-open the modal unless the user dismissed
+    // it on a prior visit.
+    try {
+      if (localStorage.getItem('moshon.onboarding.dismissed.v1') !== '1') {
+        onboardingOpen = true;
+      }
+    } catch {
+      // localStorage unavailable — skip onboarding entirely rather than
+      // forcing it on every load.
+    }
+
     // Restore tuning state from URL hash before anything else touches it.
     // Order matters: mode setter overwrites bandwidth and stepSize, so
     // apply mode first, then bandwidth, then frequency / gain.
@@ -383,6 +397,7 @@
   initialValue={(tuning.centerFreq / 1e6).toString()}
   onSubmit={(hz) => (tuning.centerFreq = hz)}
 />
+<Onboarding bind:open={onboardingOpen} />
 
 <main class="min-h-full flex flex-col items-center px-4 py-8 gap-6">
   <header class="text-center">
@@ -421,6 +436,15 @@
       <div class="flex items-center gap-2">
         <button
           type="button"
+          onclick={() => (onboardingOpen = true)}
+          class="inline-flex items-center gap-1 rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 px-2 py-1 text-xs font-mono cursor-pointer"
+          title="Show WebUSB setup help"
+        >
+          <HelpCircle size={12} />
+          <span>Setup</span>
+        </button>
+        <button
+          type="button"
           onclick={() => (helpOpen = true)}
           class="inline-flex items-center gap-1 rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 px-2 py-1 text-xs font-mono cursor-pointer"
           title="Show keyboard shortcuts (?)"
@@ -428,7 +452,7 @@
           <Keyboard size={12} />
           <span>?</span>
         </button>
-        <span class="font-mono text-xs text-neutral-500">B3 · B4 · B5 · B6 · B7</span>
+        <span class="font-mono text-xs text-neutral-500">B3 · B4 · B5 · B6 · B7 · B8</span>
       </div>
     </header>
 
@@ -696,7 +720,7 @@
   </section>
 
   <p class="text-xs text-neutral-500 max-w-lg text-center">
-    Pre-alpha · B7 complete · Press <kbd class="font-mono text-neutral-300">?</kbd> for shortcuts.
+    Pre-alpha · B8 complete · Press <kbd class="font-mono text-neutral-300">?</kbd> for shortcuts.
     <br />
     <a
       href="https://github.com/matsvandamme/moshon-sdr/blob/main/AGENTS.md"
