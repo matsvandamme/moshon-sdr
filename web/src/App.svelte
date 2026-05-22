@@ -117,6 +117,15 @@
     if (rtlStatus === 'streaming') source.retune({ gain: g });
   });
 
+  // Push mode + bandwidth changes to the DSP worker without restarting.
+  // Capture both reactive reads BEFORE the streaming gate so Svelte tracks
+  // them as dependencies even on the first (non-streaming) tick.
+  $effect(() => {
+    const m = tuning.mode;
+    const bw = tuning.bandwidth;
+    if (rtlStatus === 'streaming') source.setMode(m, bw);
+  });
+
   // ---- Render loop (now just for elapsed timer) ----
 
   function tick() {
@@ -183,6 +192,8 @@
         gain: tuning.gain,
         fftSize: FFT_SIZE,
         fftRateHz: FFT_RATE_HZ,
+        mode: tuning.mode,
+        bandwidthHz: tuning.bandwidth,
         audioRing: audio.ring!.buffer,
       });
     } catch (err) {
@@ -384,7 +395,7 @@
           <Keyboard size={12} />
           <span>?</span>
         </button>
-        <span class="font-mono text-xs text-neutral-500">B3 · B4 · B5</span>
+        <span class="font-mono text-xs text-neutral-500">B3 · B4 · B5 · B6</span>
       </div>
     </header>
 
@@ -624,7 +635,7 @@
   </section>
 
   <p class="text-xs text-neutral-500 max-w-lg text-center">
-    Pre-alpha · B5 complete · Press <kbd class="font-mono text-neutral-300">?</kbd> for shortcuts.
+    Pre-alpha · B6b complete · Press <kbd class="font-mono text-neutral-300">?</kbd> for shortcuts.
     <br />
     <a
       href="https://github.com/matsvandamme/moshon-sdr/blob/main/AGENTS.md"

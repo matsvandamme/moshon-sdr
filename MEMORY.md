@@ -35,6 +35,14 @@ Long-running notes that should survive across sessions but don't belong in the f
 - NFM/AM/SSB/CW are mode-cycle UI only — actual demod lands in B6b–B6d.
 - Next milestone: **B6b** — NFM + AM demods (much simpler than WFM; single-stage envelope/quadrature demods on the existing channelizer chain).
 
+**As of B6b (NFM + AM live):**
+- B6b shipped. `NfmDemod` (quadrature FM) and `AmDemod` (envelope + DC block) added to [dsp/src/lib.rs](dsp/src/lib.rs). Both share a two-stage channelizer: 2.4 MS/s → 240 kS/s (31-tap stage-1 LPF, same as WFM) → 48 kS/s (63-tap channel filter with cutoff at `bandwidth/2`).
+- DSP worker now holds a single `Demod` slot and rebuilds it on a `setMode` message. `RtlSdrSource.setMode(mode, bandwidthHz)` exposes that to the UI. App.svelte fires it from a single `$effect` watching `tuning.mode` + `tuning.bandwidth`.
+- Mode-switch is hot — no stream restart, no re-tune, audio resumes within a frame because the IQ ring keeps flowing while the new demod's filter history warms up.
+- **NFM test gotcha**: discriminator atan2 output can swing ±π during the channel-filter transient (~63 taps = 1.3 ms at 48 kHz), so a single-pass test on a fresh demod shows max ≈ 9.6 (= π × audio_scale). Fix: warm with a discard pass first, then measure on the second pass. Same warm-up pattern the AM test already uses for DC-block convergence.
+- SSB (`usb`/`lsb`) and CW still fall back to NFM at the worker level. UI mode labels are correct but the demodulator is wrong — fine for now, fixed in B6c–B6d.
+- Next milestone: **B6c** — SSB via Weaver (USB/LSB). Adds a second low-rate mixer + Hilbert-like phasing inside the channelizer.
+
 ## Open empirical questions (resolve in code, not in docs)
 
 - [ ] S-meter calibration for RTL-SDR v3 vs v4 — measure on a known reference signal once we have receive working

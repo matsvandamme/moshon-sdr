@@ -352,6 +352,181 @@ impl Default for WfmDemod {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Narrowband-FM + AM demodulators (B6b)
+// ──────────────────────────────────────────────────────────────────────────
+//
+// Both NFM and AM share the same two-stage channelizer: a 31-tap stage-1
+// LPF decimates 2.4 MS/s → 240 kS/s (same anti-alias as WFM), then a
+// 63-tap stage-2 LPF *with cutoff matched to the demod bandwidth* decimates
+// 240 kS/s → 48 kS/s. After stage 2 the IQ is at audio rate and we apply
+// either an FM discriminator (NFM) or an envelope detector + DC block (AM).
+
+/// Stage-1 decimation factor for the narrow demods: 2.4 MS/s → 240 kS/s.
+const NARROW_IF_DECIM: usize = 10;
+/// Stage-1 sample rate after the wide anti-alias filter.
+const NARROW_IF_RATE: f32 = 240_000.0;
+/// Stage-2 decimation factor: 240 kS/s → 48 kS/s.
+const NARROW_AUDIO_DECIM: usize = 5;
+/// Default NFM peak deviation for the audio scaling. Typical ham 2 m / 70 cm.
+const NFM_DEFAULT_DEVIATION: f32 = 5_000.0;
+/// Single-pole DC-block coefficient for AM. ~24 Hz HPF at 48 kHz output.
+const AM_DC_ALPHA: f32 = 0.995;
+/// Clamp range for user-set channel bandwidth. Narrower than 1.5 kHz makes
+/// the FIR ringing dominate; wider than ~40 % of `NARROW_IF_RATE` aliases.
+const NARROW_BW_MIN: f32 = 1_500.0;
+const NARROW_BW_MAX: f32 = NARROW_IF_RATE * 0.4;
+
+fn build_stage1_iq_taps() -> Vec<f32> {
+    // Same as WFM's first stage — wide enough that the channel filter does
+    // the real selectivity job downstream.
+    lowpass_taps(31, 0.042)
+}
+
+fn build_stage2_iq_taps(bandwidth_hz: f32) -> Vec<f32> {
+    let bw = bandwidth_hz.clamp(NARROW_BW_MIN, NARROW_BW_MAX);
+    let cutoff = (bw / 2.0) / NARROW_IF_RATE;
+    lowpass_taps(63, cutoff)
+}
+
+fn u8_iq_to_complex(iq_bytes: &[u8], out: &mut Vec<Complex<f32>>) {
+    let n = iq_bytes.len() / 2;
+    out.clear();
+    out.reserve(n);
+    for i in 0..n {
+        let re = (f32::from(iq_bytes[2 * i]) - 127.5) / 127.5;
+        let im = (f32::from(iq_bytes[2 * i + 1]) - 127.5) / 127.5;
+        out.push(Complex { re, im });
+    }
+}
+
+/// Narrowband-FM demodulator. Default bandwidth 12.5 kHz (typical ham
+/// voice channel). Decimates 2.4 MS/s → 240 kS/s → 48 kS/s, then runs an
+/// FM discriminator on the 48 kS/s IQ stream.
+#[wasm_bindgen]
+pub struct NfmDemod {
+    iq_decim: ComplexDecimator,
+    chan_decim: ComplexDecimator,
+    last_z: Complex<f32>,
+    audio_scale: f32,
+    iq_in: Vec<Complex<f32>>,
+    iq_if: Vec<Complex<f32>>,
+    iq_chan: Vec<Complex<f32>>,
+}
+
+#[wasm_bindgen]
+impl NfmDemod {
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new(bandwidth_hz: f32) -> NfmDemod {
+        let stage1 = build_stage1_iq_taps();
+        let stage2 = build_stage2_iq_taps(bandwidth_hz);
+        // Scale: with peak deviation `f_dev` and output sample rate `f_s`, peak
+        // phase change per sample is `2π·f_dev/f_s`. Choosing scale = f_s /
+        // (π·f_dev) gives a peak output of ~2.0 at full deviation, matching
+        // the WFM convention.
+        let audio_scale = AUDIO_RATE / (PI * NFM_DEFAULT_DEVIATION);
+        NfmDemod {
+            iq_decim: ComplexDecimator::new(NARROW_IF_DECIM, stage1),
+            chan_decim: ComplexDecimator::new(NARROW_AUDIO_DECIM, stage2),
+            last_z: Complex { re: 1.0, im: 0.0 },
+            audio_scale,
+            iq_in: Vec::with_capacity(65_536),
+            iq_if: Vec::with_capacity(65_536 / NARROW_IF_DECIM + 16),
+            iq_chan: Vec::with_capacity(65_536 / (NARROW_IF_DECIM * NARROW_AUDIO_DECIM) + 16),
+        }
+    }
+
+    #[must_use]
+    pub fn process(&mut self, iq_bytes: &[u8]) -> Vec<f32> {
+        u8_iq_to_complex(iq_bytes, &mut self.iq_in);
+
+        self.iq_if.clear();
+        self.iq_decim.process(&self.iq_in, &mut self.iq_if);
+
+        self.iq_chan.clear();
+        self.chan_decim.process(&self.iq_if, &mut self.iq_chan);
+
+        let mut audio = Vec::with_capacity(self.iq_chan.len());
+        for &z in &self.iq_chan {
+            let prod = z * self.last_z.conj();
+            let phase = prod.im.atan2(prod.re);
+            audio.push(phase * self.audio_scale);
+            self.last_z = z;
+        }
+        audio
+    }
+}
+
+impl Default for NfmDemod {
+    fn default() -> Self {
+        Self::new(12_500.0)
+    }
+}
+
+/// AM envelope-detector demodulator. Default bandwidth 9 kHz (broadcast AM).
+/// Decimates 2.4 MS/s → 240 kS/s → 48 kS/s with a channel filter, then
+/// envelope-detects (|z|) and removes the carrier DC with a single-pole
+/// IIR high-pass.
+#[wasm_bindgen]
+pub struct AmDemod {
+    iq_decim: ComplexDecimator,
+    chan_decim: ComplexDecimator,
+    /// DC-block state. y[n] = x[n] − x[n−1] + α·y[n−1].
+    dc_x_prev: f32,
+    dc_y_prev: f32,
+    iq_in: Vec<Complex<f32>>,
+    iq_if: Vec<Complex<f32>>,
+    iq_chan: Vec<Complex<f32>>,
+}
+
+#[wasm_bindgen]
+impl AmDemod {
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new(bandwidth_hz: f32) -> AmDemod {
+        let stage1 = build_stage1_iq_taps();
+        let stage2 = build_stage2_iq_taps(bandwidth_hz);
+        AmDemod {
+            iq_decim: ComplexDecimator::new(NARROW_IF_DECIM, stage1),
+            chan_decim: ComplexDecimator::new(NARROW_AUDIO_DECIM, stage2),
+            dc_x_prev: 0.0,
+            dc_y_prev: 0.0,
+            iq_in: Vec::with_capacity(65_536),
+            iq_if: Vec::with_capacity(65_536 / NARROW_IF_DECIM + 16),
+            iq_chan: Vec::with_capacity(65_536 / (NARROW_IF_DECIM * NARROW_AUDIO_DECIM) + 16),
+        }
+    }
+
+    #[must_use]
+    pub fn process(&mut self, iq_bytes: &[u8]) -> Vec<f32> {
+        u8_iq_to_complex(iq_bytes, &mut self.iq_in);
+
+        self.iq_if.clear();
+        self.iq_decim.process(&self.iq_in, &mut self.iq_if);
+
+        self.iq_chan.clear();
+        self.chan_decim.process(&self.iq_if, &mut self.iq_chan);
+
+        let mut audio = Vec::with_capacity(self.iq_chan.len());
+        for &z in &self.iq_chan {
+            let env = (z.re * z.re + z.im * z.im).sqrt();
+            // Single-pole DC-block strips the carrier component.
+            let y = env - self.dc_x_prev + AM_DC_ALPHA * self.dc_y_prev;
+            self.dc_x_prev = env;
+            self.dc_y_prev = y;
+            audio.push(y);
+        }
+        audio
+    }
+}
+
+impl Default for AmDemod {
+    fn default() -> Self {
+        Self::new(9_000.0)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -456,5 +631,93 @@ mod tests {
             "demod output looks like silence (max abs = {max})"
         );
         assert!(max < 2.0, "demod output overshoots (max abs = {max})");
+    }
+
+    /// Synthesize a narrowband-FM signal at baseband (DC-centred) with
+    /// ±3 kHz deviation modulated by a 1 kHz audio tone. After NFM demod
+    /// the output should have meaningful amplitude (not silence) and
+    /// stay below 2.0 (matches the WFM-style scaling).
+    #[test]
+    fn nfm_demod_recovers_modulated_tone() {
+        let chunk_samples = 48_000usize; // 20 ms at 2.4 MS/s
+        let mut iq = vec![0u8; chunk_samples * 2];
+        let mut phase = 0.0f32;
+        let dev = 3_000.0_f32;
+        let mod_freq = 1_000.0_f32;
+        let amp = 100.0_f32;
+        for n in 0..chunk_samples {
+            let t = n as f32 / WFM_INPUT_RATE;
+            let inst_freq = dev * (2.0 * PI * mod_freq * t).cos();
+            phase += 2.0 * PI * inst_freq / WFM_INPUT_RATE;
+            iq[2 * n] = f32_to_u8(amp * phase.cos() + 127.5);
+            iq[2 * n + 1] = f32_to_u8(amp * phase.sin() + 127.5);
+        }
+
+        let mut demod = NfmDemod::new(12_500.0);
+        // First pass warms the channel filter + discriminator state. During
+        // the filter transient atan2 output can swing the full ±π and we
+        // want a settled signal before checking peak amplitude.
+        let _ = demod.process(&iq);
+        let audio = demod.process(&iq);
+
+        // 48_000 / (10 * 5) = 960 samples (20 ms at 48 kHz).
+        assert!(
+            audio.len() >= 900 && audio.len() <= 1000,
+            "unexpected audio length: {}",
+            audio.len()
+        );
+
+        let max = audio.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+        assert!(
+            max > 0.1,
+            "NFM demod output looks like silence (max = {max})"
+        );
+        assert!(max < 2.0, "NFM demod overshoots (max = {max})");
+    }
+
+    /// Synthesize an AM signal: unmodulated carrier at DC plus a sinusoidal
+    /// amplitude envelope. After AM demod the DC component should be
+    /// removed and a 1 kHz tone should be present.
+    #[test]
+    fn am_demod_recovers_envelope_tone() {
+        let chunk_samples = 48_000usize;
+        let mut iq = vec![0u8; chunk_samples * 2];
+        let mod_freq = 1_000.0_f32;
+        let depth = 0.7_f32;
+        let carrier_amp = 100.0_f32;
+        for n in 0..chunk_samples {
+            let t = n as f32 / WFM_INPUT_RATE;
+            // AM signal at DC: complex carrier with amplitude modulated.
+            let env = 1.0 + depth * (2.0 * PI * mod_freq * t).sin();
+            // Keep the carrier static (zero IF) — no phase rotation needed.
+            iq[2 * n] = f32_to_u8(carrier_amp * env + 127.5);
+            iq[2 * n + 1] = f32_to_u8(127.5);
+        }
+
+        let mut demod = AmDemod::new(9_000.0);
+        // Warm the DC block + filter history with a first pass; the first
+        // few hundred samples carry the carrier step.
+        let _ = demod.process(&iq);
+        let audio = demod.process(&iq);
+
+        assert!(
+            audio.len() >= 900 && audio.len() <= 1000,
+            "unexpected audio length: {}",
+            audio.len()
+        );
+
+        let max = audio.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+        assert!(
+            max > 0.05,
+            "AM demod output looks like silence (max = {max})"
+        );
+        assert!(max < 2.0, "AM demod overshoots (max = {max})");
+
+        // After DC-block the mean should be near zero.
+        let mean: f32 = audio.iter().copied().sum::<f32>() / audio.len() as f32;
+        assert!(
+            mean.abs() < 0.05,
+            "AM output not DC-blocked (mean = {mean})"
+        );
     }
 }

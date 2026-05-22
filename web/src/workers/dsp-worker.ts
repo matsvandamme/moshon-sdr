@@ -5,12 +5,20 @@
  * (throttled to a target frame rate); audio samples flow through a separate
  * SAB ring to the AudioWorklet.
  *
- * Demod modes implemented in B6a: WFM mono only. NFM/AM/SSB/CW land in
- * B6b–B6d.
+ * Demod modes implemented:
+ *   - WFM (B6a)  — broadcast FM mono
+ *   - NFM (B6b)  — narrowband FM, user-set bandwidth
+ *   - AM  (B6b)  — envelope detector, user-set bandwidth
+ *
+ * SSB/CW land in B6c–B6d. For now they fall back to NFM so the audio path
+ * still produces something audible while the user can tell from the UI
+ * label that the demodulator is wrong.
  */
 
-import init, { FftContext, WfmDemod } from '../lib/dsp/wasm/moshon_dsp.js';
+import init, { AmDemod, FftContext, NfmDemod, WfmDemod } from '../lib/dsp/wasm/moshon_dsp.js';
 import { SabRing } from '../lib/ring/sab-ring';
+
+export type DemodMode = 'wfm' | 'nfm' | 'am' | 'usb' | 'lsb' | 'cw';
 
 type InboundInit = {
   kind: 'init';
@@ -19,19 +27,29 @@ type InboundInit = {
   fftSize: number;
   /** Target rate of FFT frames posted to main, in Hz. */
   postRateHz: number;
+  mode: DemodMode;
+  bandwidthHz: number;
 };
+type InboundSetMode = { kind: 'setMode'; mode: DemodMode; bandwidthHz: number };
 type InboundStop = { kind: 'stop' };
-type Inbound = InboundInit | InboundStop;
+type Inbound = InboundInit | InboundSetMode | InboundStop;
 
 type OutboundReady = { kind: 'ready' };
 type OutboundFft = { kind: 'fft'; bins: Float32Array; time: number };
 type OutboundError = { kind: 'error'; message: string };
 type Outbound = OutboundReady | OutboundFft | OutboundError;
 
+type Demod = {
+  process(iq: Uint8Array): Float32Array;
+  free(): void;
+};
+
 let iqRing: SabRing | null = null;
 let audioRing: SabRing | null = null;
 let fft: FftContext | null = null;
-let wfm: WfmDemod | null = null;
+let demod: Demod | null = null;
+let currentMode: DemodMode = 'wfm';
+let currentBandwidth = 200_000;
 let iqBufferForFft: Uint8Array | null = null;
 let running = false;
 let minPostIntervalMs = 33;
@@ -41,11 +59,35 @@ function postOut(msg: Outbound, transfer: Transferable[] = []) {
   self.postMessage(msg, { transfer });
 }
 
+function buildDemod(mode: DemodMode, bandwidthHz: number): Demod {
+  switch (mode) {
+    case 'wfm':
+      return new WfmDemod();
+    case 'am':
+      return new AmDemod(bandwidthHz);
+    case 'nfm':
+    case 'usb':
+    case 'lsb':
+    case 'cw':
+    default:
+      // SSB/CW not implemented yet — fall back to NFM so the chain still
+      // produces audio while the UI label tells the user it's the wrong demod.
+      return new NfmDemod(bandwidthHz);
+  }
+}
+
+function rebuildDemod(mode: DemodMode, bandwidthHz: number) {
+  demod?.free();
+  demod = buildDemod(mode, bandwidthHz);
+  currentMode = mode;
+  currentBandwidth = bandwidthHz;
+}
+
 async function setup(opts: InboundInit) {
   try {
     await init();
     fft = new FftContext(opts.fftSize);
-    wfm = new WfmDemod();
+    rebuildDemod(opts.mode, opts.bandwidthHz);
     iqRing = new SabRing(opts.iqRing);
     audioRing = new SabRing(opts.audioRing);
     iqBufferForFft = new Uint8Array(opts.fftSize * 2);
@@ -65,7 +107,7 @@ async function processLoop() {
   // 1/30 s of IQ at 2.4 MS/s ≈ 80 000 samples × 2 bytes = 160 000 bytes.
   const demodScratch = new Uint8Array(160_000);
 
-  while (running && iqRing && audioRing && fft && wfm && iqBufferForFft) {
+  while (running && iqRing && audioRing && fft && demod && iqBufferForFft) {
     // --- FFT path: needs exactly fftSize samples (fftSize*2 bytes). ---
     if (iqRing.available() < iqBufferForFft.length) {
       await yieldStep();
@@ -83,10 +125,10 @@ async function processLoop() {
       return;
     }
 
-    // Run WFM demod on the same chunk we just FFT'd.
+    // Run demod on the same chunk we just FFT'd.
     let audio: Float32Array;
     try {
-      audio = wfm.process(iqBufferForFft);
+      audio = demod.process(iqBufferForFft);
     } catch (err) {
       running = false;
       postOut({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
@@ -105,7 +147,7 @@ async function processLoop() {
     while (iqRing.available() >= demodScratch.length) {
       iqRing.read(demodScratch);
       try {
-        const audioMore = wfm.process(demodScratch);
+        const audioMore = demod.process(demodScratch);
         if (audioMore.length > 0) {
           const moreBytes = new Uint8Array(
             audioMore.buffer,
@@ -135,6 +177,11 @@ self.onmessage = (e: MessageEvent<Inbound>) => {
   switch (msg.kind) {
     case 'init':
       void setup(msg);
+      break;
+    case 'setMode':
+      if (msg.mode !== currentMode || msg.bandwidthHz !== currentBandwidth) {
+        rebuildDemod(msg.mode, msg.bandwidthHz);
+      }
       break;
     case 'stop':
       running = false;

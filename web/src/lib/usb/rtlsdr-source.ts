@@ -17,6 +17,7 @@
  */
 
 import { SabRing } from '../ring/sab-ring';
+import type { DemodMode } from '../../workers/dsp-worker';
 
 const RTL2832U_FILTERS: USBDeviceFilter[] = [
   { vendorId: 0x0bda, productId: 0x2832 },
@@ -38,6 +39,10 @@ export type StreamOptions = {
   fftSize?: number;
   /** Target rate of FFT frames delivered to listeners (Hz). Default 30. */
   fftRateHz?: number;
+  /** Demodulator mode the DSP worker should run on this stream. */
+  mode: DemodMode;
+  /** Channel filter bandwidth in Hz (used by NFM/AM, ignored by WFM). */
+  bandwidthHz: number;
   /**
    * SharedArrayBuffer the DSP worker writes 48 kHz mono f32 PCM into,
    * to be consumed by an AudioWorklet on the main thread.
@@ -125,6 +130,8 @@ export class RtlSdrSource {
       audioRing: opts.audioRing,
       fftSize,
       postRateHz: fftRateHz,
+      mode: opts.mode,
+      bandwidthHz: opts.bandwidthHz,
     });
 
     this.usbWorker!.postMessage({
@@ -154,6 +161,16 @@ export class RtlSdrSource {
       kind: 'retune',
       ...opts,
     });
+  }
+
+  /**
+   * Switch the demodulator without restarting the stream. The DSP worker
+   * disposes the old demod and constructs a new one in-place; the IQ ring
+   * is unaffected so audio resumes within a frame.
+   */
+  setMode(mode: DemodMode, bandwidthHz: number): void {
+    if (!this.dspWorker) return;
+    this.dspWorker.postMessage({ kind: 'setMode', mode, bandwidthHz });
   }
 
   /** Stops streaming. Device remains permitted but the workers shut down. */
