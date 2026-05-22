@@ -87,7 +87,7 @@ Each phase ends with a tagged commit. Each milestone is roughly one PR.
 - [x] **B7** URL hash state (`#f=…&m=…&bw=…&g=…` restored on load via `history.replaceState`); localStorage memory channels (save/recall current tuning, max 50); IARU Region 1 band overlay strip above the spectrum frequency axis; peak-dBFS S-meter with rough S-unit mapping. (PRD M1.7–M1.10)
 - [x] **B8** First-run onboarding modal with per-OS WebUSB setup steps (Windows/Zadig, macOS, Linux/udev). Detects OS from `navigator.userAgent` and defaults to that tab. Dismissal persisted in `localStorage` under `moshon.onboarding.dismissed.v1`. Header has a "Setup" button to re-open. (PRD M1.11)
 - [x] **B9** Network IQ source: Go bridge daemon (`bridge/`) accepts WebSocket upgrades on `/ws`, dials the configured `rtl_tcp` server, and proxies bytes both ways. Origin allow-list defaults to the Pages URL (use `--cors-origin '*'` for trusted LANs). Browser-side `RtlTcpSource` + `network-worker.ts` parse the 12-byte dongle header, stream IQ into the SAB ring, and send 5-byte rtl_tcp commands for freq/sample-rate/gain. App.svelte has a USB/Network input-mode toggle persisted in localStorage; bridge URL is **never** in the URL hash (privacy). GoReleaser release matrix to follow in B10. (PRD M1.12)
-- [ ] **B10** Definition-of-Done validation: PRD success criteria S1–S5 confirmed. Tag `v0.1.0`.
+- [x] **B10** Definition-of-Done validation drafted in [docs/DoD-v0.1.0.md](docs/DoD-v0.1.0.md). S4 + S5 verified in code; S1 deferred (adoption metric); S2 + S3 pending the author's hardware test. Tagging `v0.1.0` + `bridge-v0.1.0` waits on the manual checklist.
 
 ### Phase 3 — M2 should-haves (weeks 10+)
 - [ ] HackRF One driver
