@@ -67,11 +67,20 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages project create moshon-sdr --production-branch=main
 
+      # Pass --commit-message explicitly with an ASCII-only string. Wrangler's
+      # auto-detected git message can contain Unicode (e.g. → in commit bodies)
+      # which Cloudflare's deployments API rejects with code 8000111.
       - name: Deploy to Cloudflare Pages
         id: deploy
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy web/dist --project-name=moshon-sdr --commit-dirty=true
+          command: >-
+            pages deploy web/dist
+            --project-name=moshon-sdr
+            --commit-dirty=true
+            --branch=main
+            --commit-hash=${{ github.sha }}
+            --commit-message=Deploy_${{ github.sha }}
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
