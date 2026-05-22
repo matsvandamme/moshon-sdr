@@ -1,0 +1,51 @@
+# Node
+node_modules/
+.pnpm-store/
+*.log
+.npm/
+.eslintcache
+
+# Vite / build output
+dist/
+build/
+.svelte-kit/
+*.local
+
+# Rust / WASM
+target/
+pkg/
+**/*.rs.bk
+Cargo.lock        # libraries don't commit lockfiles; we'll commit when we ship a bin
+
+# Go
+bridge/dist/
+bridge/moshon-bridge
+bridge/moshon-bridge.exe
+*.test
+*.out
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+.idea/
+
+# Claude Code local overrides
+.claude/settings.local.json
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Playwright / test artifacts
+playwright-report/
+test-results/
+coverage/
+
+# Misc
+*.swp
+*.swo
+.tmp/

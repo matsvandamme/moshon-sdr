@@ -1,21 +1,13 @@
 ## Summary
-- [ ] Short description of the change
+<!-- One paragraph: what changed and why. -->
 
-## Changes
-- [ ] Key updates (files, prompts, or workflow steps)
+## Test plan
+- [ ] `pnpm -C web run check` passes
+- [ ] `pnpm -C web run test` passes
+- [ ] If `dsp/` changed: `cargo -C dsp test` + `cargo -C dsp clippy -- -D warnings` pass
+- [ ] If `bridge/` changed: `go -C bridge test ./...` + `go vet ./...` pass
+- [ ] Manual: <what you actually clicked, tuned, listened to>
+- [ ] If perf-relevant: numbers before/after
 
-## Testing
-- [ ] Not run (explain why)
-- [ ] Manual checks
-- [ ] Automated tests (list commands)
-
-## Docs/Guides Impact
-- [ ] README updated (if needed)
-- [ ] Workflow prompts updated (if needed)
-- [ ] Tool config guidance updated (if needed)
-
-## Checklist
-- [ ] Changes match project scope
-- [ ] No unrelated files modified
-- [ ] Links verified (if applicable)
-- [ ] Ready for review
+## Linked
+PRD: M1.X · Milestone: BX
