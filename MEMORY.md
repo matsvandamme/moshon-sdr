@@ -14,7 +14,9 @@ Long-running notes that should survive across sessions but don't belong in the f
 - Repo: https://github.com/matsvandamme/moshon-sdr (private).
 - Subprojects scaffolded: `web/` (Svelte 5 + Vite + Tailwind 4), `dsp/` (Rust→WASM, builds via `wasm-pack`), `bridge/` (Go).
 - End-to-end build verified locally: `pnpm -C web build` produces ~30 KB gzipped including a real WASM module that exports `smoke()`.
+- End-to-end **deploy** verified at https://moshon-sdr.pages.dev — green "DSP module ready" badge confirms Rust→WASM→Vite→Cloudflare→browser pipeline works. COOP/COEP headers serving correctly.
 - Toolchains installed on author's Win11 machine: Node 24, pnpm 11, Rust 1.95 + cargo, Go 1.26.3, wasm-pack 0.15, VS Build Tools 2022.
+- Cloudflare Pages project `moshon-sdr` exists; deploy workflow self-bootstraps via `pages project create` (idempotent).
 - Next milestone: **B3 — RTL-SDR v3/v4 WebUSB driver** via `webrtlsdr` dependency.
 - Hardware on hand: (to be confirmed by author)
 
