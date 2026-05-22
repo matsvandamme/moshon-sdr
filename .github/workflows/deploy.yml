@@ -56,16 +56,38 @@ jobs:
       - name: Build web (prebuild hook runs wasm-pack)
         run: pnpm -C web build
 
-      # Wrangler 3 won't auto-create Pages projects. Create on first run;
-      # subsequent runs fail with "already exists" which we silence via
-      # continue-on-error. Cheap (~1 sec) and keeps the workflow self-bootstrapping.
+      # Check whether the Pages project exists; create only if missing.
+      # Cleaner than wrangler-action + continue-on-error which leaves a red
+      # "Action failed" annotation on every successful run after the first.
       - name: Ensure Cloudflare Pages project exists
-        continue-on-error: true
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages project create moshon-sdr --production-branch=main
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/pages/projects/moshon-sdr")
+          case "$status" in
+            200)
+              echo "Pages project 'moshon-sdr' already exists."
+              ;;
+            404)
+              echo "Creating Pages project 'moshon-sdr'..."
+              curl -sSf -X POST \
+                -H "Authorization: Bearer $CF_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d '{"name":"moshon-sdr","production_branch":"main"}' \
+                "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/pages/projects" \
+                > /dev/null
+              echo "Created."
+              ;;
+            *)
+              echo "Unexpected HTTP $status from Cloudflare API while probing project."
+              exit 1
+              ;;
+          esac
 
       # Pass --commit-message explicitly with an ASCII-only string. Wrangler's
       # auto-detected git message can contain Unicode (e.g. → in commit bodies)
