@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Radio, CircleCheck, CircleAlert, Loader2 } from 'lucide-svelte';
   import { onMount } from 'svelte';
+  import init, { smoke } from './lib/dsp/wasm/moshon_dsp.js';
 
   type WasmStatus = 'pending' | 'ready' | 'error';
 
@@ -10,11 +11,8 @@
 
   onMount(async () => {
     try {
-      // B1 smoke test: load the DSP WASM module and call a known export.
-      // The real module lives in dsp/ and is built via `pnpm run wasm:build`.
-      // Until B3 wires it up, we surface a friendly "pending" state.
-      const mod = await import('./lib/dsp/wasm-placeholder');
-      smokeResult = mod.smoke();
+      await init();
+      smokeResult = smoke();
       wasmStatus = 'ready';
     } catch (err) {
       wasmStatus = 'error';

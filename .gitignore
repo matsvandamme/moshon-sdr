@@ -15,7 +15,8 @@ build/
 target/
 pkg/
 **/*.rs.bk
-Cargo.lock        # libraries don't commit lockfiles; we'll commit when we ship a bin
+# Generated WASM bindings (rebuilt via `pnpm wasm:build`)
+web/src/lib/dsp/wasm/
 
 # Go
 bridge/dist/

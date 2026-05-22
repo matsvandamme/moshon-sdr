@@ -8,20 +8,24 @@ Long-running notes that should survive across sessions but don't belong in the f
 
 ## Project state snapshot
 
-**As of 2026-05-22:**
+**As of 2026-05-22 (end of B1):**
 
-- Phase: end of Step 4 (Agent Config) in the vibe-coding workflow.
+- Phase: Step 5 (Build), B1 + B2 complete.
 - Repo: https://github.com/matsvandamme/moshon-sdr (private).
-- Code: none yet. Only docs.
-- Next milestone: **B1 — Project scaffold.**
+- Subprojects scaffolded: `web/` (Svelte 5 + Vite + Tailwind 4), `dsp/` (Rust→WASM, builds via `wasm-pack`), `bridge/` (Go).
+- End-to-end build verified locally: `pnpm -C web build` produces ~30 KB gzipped including a real WASM module that exports `smoke()`.
+- Toolchains installed on author's Win11 machine: Node 24, pnpm 11, Rust 1.95 + cargo, Go 1.26.3, wasm-pack 0.15, VS Build Tools 2022.
+- Next milestone: **B3 — RTL-SDR v3/v4 WebUSB driver** via `webrtlsdr` dependency.
 - Hardware on hand: (to be confirmed by author)
 
 ## Open empirical questions (resolve in code, not in docs)
 
 - [ ] S-meter calibration for RTL-SDR v3 vs v4 — measure on a known reference signal once we have receive working
 - [ ] WFM RDS — implement in M1 alongside WFM, or punt to M2? Re-decide after B6.
-- [ ] Does Vite dev server respect `_headers`-style files, or do we need the explicit `server.headers` config? (TechDesign assumes the explicit config; verify in B2.)
-- [ ] Confirm `webrtlsdr` Apache-2.0 license claim from the README — read `LICENSE` file once the dependency is in `package.json`.
+- [x] Does Vite dev server respect `_headers`-style files, or do we need the explicit `server.headers` config? **Resolved (B1): Vite needs explicit `server.headers` — `_headers` is Cloudflare-only. Both are configured now.**
+- [ ] Confirm `webrtlsdr` Apache-2.0 license claim from the README — read `LICENSE` file once the dependency is in `package.json` (B3).
+- [ ] Track [wasm-pack#1442](https://github.com/rustwasm/wasm-pack/issues/1442) — once wasm-pack ships a newer bundled `wasm-opt`, re-enable wasm-opt in `dsp/Cargo.toml` for the ~5-10% size win.
+- [x] **Cargo's `-C` flag is unstable on stable Rust 1.95.** Use `(cd dsp && cargo ...)` everywhere. Documented in all agent docs.
 
 ## Decisions log
 

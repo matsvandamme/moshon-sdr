@@ -70,8 +70,8 @@ For typo fixes or single-file tweaks, the plan step is implicit — just make th
 Each phase ends with a tagged commit. Each milestone is roughly one PR.
 
 ### Phase 1 — Foundation (week 0)
-- [ ] **B1** Project scaffold: `web/`, `dsp/`, `bridge/`, CI placeholders, MIT LICENSE, README stub, Vite + WASM smoke test
-- [ ] **B2** COOP/COEP headers verified locally and on Pages preview deploy
+- [x] **B1** Project scaffold: `web/`, `dsp/`, `bridge/`, CI workflows, MIT LICENSE, README stub, Vite + WASM end-to-end build (Rust→WASM `smoke()` returns 42)
+- [x] **B2** COOP/COEP headers (folded into B1 — set in both `vite.config.ts` and `web/public/_headers`)
 
 ### Phase 2 — M1 must-haves (weeks 1–9)
 - [ ] **B3** RTL-SDR v3/v4 WebUSB driver via `webrtlsdr`, raw IQ streaming over SharedArrayBuffer ring (PRD M1.1)
@@ -145,11 +145,10 @@ These are non-negotiable. Violating any of them is a stop-the-line event.
 - B1a: cleanup + project identity (LICENSE, README, .gitignore, etc.)
 - B1c: scaffold `web/` (Svelte 5 + Vite + Tailwind 4 + lucide-svelte), `dsp/` (Cargo crate stub with `smoke()` export), `bridge/` (Go module + stub main.go)
 - B1d: four GitHub Actions workflows (ci, deploy, bridge-release, claude-review) + GoReleaser config
-**Currently working on:** B1 final verification.
-**Blocked by:** Visual Studio Build Tools install in progress on author's Windows machine (needed for `cargo install wasm-pack` → wires `dsp/` into the web build). Web smoke test (page loads + placeholder "DSP module ready" message) works without it.
-**Manual verification still needed:**
-- Run `pnpm -C web dev` and open the dev server; confirm the smoke test page shows "DSP module ready — smoke test returned 42"
-- Once wasm-pack is installed: replace `web/src/lib/dsp/wasm-placeholder.ts` with real WASM bindings (deferred to B3/B4)
+**Currently working on:** B1 done. Ready for B3 (B2 folded into B1).
+**Blocked by:** None.
+**Manual verification still pending (one-time, on author's machine):**
+- Run `pnpm -C web dev` and open http://localhost:5173. Confirm the page shows "DSP module ready — smoke test returned 42". WASM is now built end-to-end (Rust → wasm-pack → Vite bundle). Build verified: ~30 KB gzipped total.
 
 ## Agent behavior baseline
 

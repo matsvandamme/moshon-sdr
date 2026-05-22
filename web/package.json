@@ -4,6 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "wasm:build": "wasm-pack build ../dsp --target web --release --out-dir ../web/src/lib/dsp/wasm",
+    "wasm:build:dev": "wasm-pack build ../dsp --target web --dev --out-dir ../web/src/lib/dsp/wasm",
+    "predev": "pnpm run wasm:build:dev",
+    "prebuild": "pnpm run wasm:build",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",

@@ -29,3 +29,9 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# wasm-pack 0.15 ships a wasm-opt too old for the bulk-memory ops modern rustc
+# emits by default. We rely on Rust's own opt-level=3 + LTO until wasm-pack
+# bundles a newer binaryen. Track: https://github.com/rustwasm/wasm-pack/issues/1442
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
