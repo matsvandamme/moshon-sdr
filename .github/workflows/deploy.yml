@@ -29,14 +29,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
-
-      - name: Enable pnpm
-        run: corepack enable
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -49,16 +50,10 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
 
-      - name: Build WASM
-        run: |
-          # TODO(B3/B4): replace with `pnpm -C web run wasm:build` once that
-          # script orchestrates the wasm-pack invocation and output copy.
-          wasm-pack build dsp --target web --release --out-dir ../web/src/lib/dsp/wasm
-
       - name: Install web dependencies
         run: pnpm -C web install --frozen-lockfile
 
-      - name: Build web
+      - name: Build web (prebuild hook runs wasm-pack)
         run: pnpm -C web build
 
       - name: Deploy to Cloudflare Pages
