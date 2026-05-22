@@ -37,11 +37,10 @@ pnpm -C web run lint
 pnpm -C web run test
 pnpm -C web run test:e2e     # Playwright
 
-# DSP (Rust)
-cargo -C dsp test
-cargo -C dsp clippy -- -D warnings
+# DSP (Rust) — cargo's -C flag is unstable; cd into dsp/ first
+cd dsp; cargo test; cargo clippy -- -D warnings; cd ..
 
-# Bridge (Go)
+# Bridge (Go) — Go's -C is stable
 go -C bridge test ./...
 go -C bridge build -o ../dist/moshon-bridge ./
 ```

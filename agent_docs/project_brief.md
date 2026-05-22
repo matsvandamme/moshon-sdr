@@ -25,7 +25,7 @@ The author (Matthieu) reaches for Moshon SDR instead of SDR++ for 5 consecutive 
 1. `pnpm -C web run check` (svelte-check + tsc) — green
 2. `pnpm -C web run lint` — green
 3. `pnpm -C web run test` — green
-4. If `dsp/` changed: `cargo -C dsp test` + `clippy -- -D warnings` — green
+4. If `dsp/` changed: `(cd dsp && cargo test && cargo clippy -- -D warnings)` — green
 5. If `bridge/` changed: `go -C bridge test ./...` + `go vet ./...` — green
 6. If user-visible: Playwright happy path passes (`pnpm -C web run test:e2e`)
 7. If perf-relevant: include before/after numbers in PR description

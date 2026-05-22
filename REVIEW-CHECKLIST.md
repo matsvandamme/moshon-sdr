@@ -7,7 +7,7 @@ Run through this before opening a PR or hitting "merge". Most checks are mechani
 - [ ] `pnpm -C web run check` — svelte-check + tsc, zero warnings
 - [ ] `pnpm -C web run lint` — ESLint + Prettier, zero warnings
 - [ ] `pnpm -C web run test` — Vitest, all green
-- [ ] If `dsp/` changed: `cargo -C dsp test` + `clippy -- -D warnings`
+- [ ] If `dsp/` changed: `(cd dsp && cargo test && cargo clippy -- -D warnings)`
 - [ ] If `bridge/` changed: `go -C bridge test ./...` + `go vet ./...`
 - [ ] If user-visible: Playwright happy path passes (`pnpm -C web run test:e2e`)
 - [ ] No new dependencies without a one-paragraph rationale in PR description

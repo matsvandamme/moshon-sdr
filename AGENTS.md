@@ -41,11 +41,13 @@ pnpm -C web run check            # svelte-check + tsc
 pnpm -C web run lint
 pnpm -C web run test             # Vitest
 
-# DSP crate (Rust)
-cargo -C dsp test
-cargo -C dsp clippy -- -D warnings
+# DSP crate (Rust) — run from inside dsp/
+cd dsp
+cargo test
+cargo clippy -- -D warnings
+cd ..
 
-# Bridge daemon (Go)
+# Bridge daemon (Go) — Go's -C flag is stable
 go -C bridge test ./...
 go -C bridge build -o ../dist/moshon-bridge ./
 

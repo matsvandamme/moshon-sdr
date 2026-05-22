@@ -160,7 +160,7 @@ One paragraph: what changed and why.
 ## Test plan
 - [ ] `pnpm -C web run check` passes
 - [ ] `pnpm -C web run test` passes
-- [ ] `cargo -C dsp test` passes
+- [ ] `(cd dsp && cargo test)` passes
 - [ ] Manual: <what you actually clicked/tuned/listened to>
 - [ ] If perf-relevant: numbers before/after
 
