@@ -46,12 +46,21 @@ type OutboundReady = { kind: 'ready' };
 type OutboundFft = { kind: 'fft'; bins: Float32Array; time: number };
 type OutboundAudio = { kind: 'audio'; samples: Float32Array; time: number };
 type OutboundCwText = { kind: 'cwText'; text: string; wpm: number };
+type OutboundRds = {
+  kind: 'rds';
+  synced: boolean;
+  pi: number;
+  ps: string;
+  rt: string;
+  stereo: boolean;
+};
 type OutboundError = { kind: 'error'; message: string };
 type Outbound =
   | OutboundReady
   | OutboundFft
   | OutboundAudio
   | OutboundCwText
+  | OutboundRds
   | OutboundError;
 
 type Demod = {
@@ -86,6 +95,13 @@ let minPostIntervalMs = 33;
 let lastPostMs = 0;
 let recording = false;
 let cwDecoder: CwDecoder | null = null;
+let wfmDemodRef: WfmDemod | null = null;
+let rdsTickerHandle: ReturnType<typeof setInterval> | null = null;
+let lastRdsPi = -1;
+let lastRdsPs = '';
+let lastRdsRt = '';
+let lastRdsSynced = false;
+let lastRdsStereo = false;
 
 function postOut(msg: Outbound, transfer: Transferable[] = []) {
   self.postMessage(msg, { transfer });
@@ -104,8 +120,11 @@ function maybeTapForRecording(stereo: Float32Array) {
 
 function buildDemod(mode: DemodMode, bandwidthHz: number): Demod {
   switch (mode) {
-    case 'wfm':
-      return new WfmDemod();
+    case 'wfm': {
+      const w = new WfmDemod();
+      wfmDemodRef = w;
+      return w;
+    }
     case 'am':
       return new AmDemod(bandwidthHz);
     case 'nfm':
@@ -123,12 +142,54 @@ function buildDemod(mode: DemodMode, bandwidthHz: number): Demod {
 
 function rebuildDemod(mode: DemodMode, bandwidthHz: number) {
   demod?.free();
+  if (mode !== 'wfm') wfmDemodRef = null;
   demod = buildDemod(mode, bandwidthHz);
   currentMode = mode;
   currentBandwidth = bandwidthHz;
   // Reset the CW decoder state on mode change so leftover patterns from a
   // previous CW session don't bleed into the next one.
   cwDecoder?.reset();
+  // Clear cached RDS for the new mode so the UI clears immediately.
+  lastRdsPi = -1;
+  lastRdsPs = '';
+  lastRdsRt = '';
+  lastRdsSynced = false;
+  lastRdsStereo = false;
+  startOrStopRdsTicker();
+}
+
+function startOrStopRdsTicker() {
+  // Poll the WfmDemod's RDS accessors at 2 Hz when in WFM mode. Only post
+  // if something actually changed to keep main-thread work down.
+  if (currentMode === 'wfm' && !rdsTickerHandle) {
+    rdsTickerHandle = setInterval(() => {
+      if (!wfmDemodRef) return;
+      const synced = wfmDemodRef.rds_synced;
+      const pi = wfmDemodRef.rds_pi;
+      const ps = wfmDemodRef.rds_ps();
+      const rt = wfmDemodRef.rds_rt();
+      const stereo = wfmDemodRef.is_stereo_locked;
+      if (
+        synced !== lastRdsSynced ||
+        pi !== lastRdsPi ||
+        ps !== lastRdsPs ||
+        rt !== lastRdsRt ||
+        stereo !== lastRdsStereo
+      ) {
+        lastRdsSynced = synced;
+        lastRdsPi = pi;
+        lastRdsPs = ps;
+        lastRdsRt = rt;
+        lastRdsStereo = stereo;
+        postOut({ kind: 'rds', synced, pi, ps, rt, stereo });
+      }
+    }, 500);
+  } else if (currentMode !== 'wfm' && rdsTickerHandle) {
+    clearInterval(rdsTickerHandle);
+    rdsTickerHandle = null;
+    // Send a final empty event so the UI clears its panel.
+    postOut({ kind: 'rds', synced: false, pi: 0, ps: '', rt: '', stereo: false });
+  }
 }
 
 /**
@@ -156,6 +217,7 @@ async function setup(opts: InboundInit) {
     minPostIntervalMs = 1000 / Math.max(1, opts.postRateHz);
     lastPostMs = 0;
     running = true;
+    startOrStopRdsTicker();
     postOut({ kind: 'ready' });
     void processLoop();
   } catch (err) {
@@ -265,6 +327,10 @@ self.onmessage = (e: MessageEvent<Inbound>) => {
       break;
     case 'stop':
       running = false;
+      if (rdsTickerHandle) {
+        clearInterval(rdsTickerHandle);
+        rdsTickerHandle = null;
+      }
       break;
   }
 };

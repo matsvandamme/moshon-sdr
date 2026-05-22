@@ -364,6 +364,315 @@ const WFM_PILOT_ENV_ALPHA: f32 = 0.001;
 /// MEMORY.md about exposing this as a user knob.
 const WFM_DEEMPH_TAU_S: f32 = 50e-6;
 
+// ─── RDS constants ───────────────────────────────────────────────────────
+/// RDS subcarrier frequency (Hz). 3× the 19 kHz pilot, locked to it.
+const RDS_SUBCARRIER_HZ: f32 = 57_000.0;
+/// RDS half-symbol rate (2× baud due to biphase channel coding).
+/// The actual data rate is `RDS_HALF_BAUD / 2.0` = 1187.5 baud.
+const RDS_HALF_BAUD: f32 = 2_375.0;
+/// Generator polynomial G(x) = x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1.
+/// We keep only the lower 10 bits (the implicit x^10 is the feedback).
+const RDS_GEN_POLY: u16 = 0b0001_1011_1001;
+/// Offset words per RDS spec (added to the syndrome at transmit time).
+const RDS_OFFSET_A: u16 = 0x0FC;
+const RDS_OFFSET_B: u16 = 0x198;
+const RDS_OFFSET_C: u16 = 0x168;
+const RDS_OFFSET_C_PRIME: u16 = 0x350;
+const RDS_OFFSET_D: u16 = 0x1B4;
+/// Bits per RDS block (16 data + 10 checkword).
+const RDS_BITS_PER_BLOCK: u32 = 26;
+
+/// RDS BPSK + protocol decoder. Embedded in `WfmDemod` and fed MPX samples
+/// (plus a coherent 57 kHz reference derived from the pilot) on every IF-rate
+/// loop iteration.
+///
+/// Pipeline:
+///   1. Caller multiplies MPX by `ref57` (and optionally `ref57_q`, in-phase
+///      and quadrature via pilot tripling). We low-pass with a biquad to
+///      isolate the baseband BPSK.
+///   2. Symbol clock: fractional phase accumulator at 2× baud (= 2375 Hz)
+///      driven by the IF-rate. When the accumulator wraps, we emit a half
+///      symbol (the sign of the I-channel baseband).
+///   3. Biphase: each transmitted bit is two half-symbols of opposite
+///      polarity. We pick one of two phase alignments — whichever produces
+///      block sync first wins.
+///   4. Differential decode: `data_bit = current XOR previous`.
+///   5. Sliding 26-bit window. For each candidate offset word (A, B, C, C',
+///      D), compute the syndrome and check if it equals that offset. If so,
+///      we have a tentative block boundary.
+///   6. Track the 4-block group state. On a complete Group 0A, extract two
+///      PS characters at the address from block 2 and write them into the
+///      PS buffer. Group 2A populates the 64-char Radio Text buffer.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+struct RdsDecoder {
+    // Front-end (operates at the 240 kHz IF rate). Q-channel LPF will be
+    // added when we wire a PLL for proper phase tracking; for now the
+    // I-only baseband works on strong RDS signals.
+    i_lpf: Biquad,
+    half_symbol_phase: f32,
+    half_symbol_step: f32,
+
+    // Biphase decoder: store last half-symbol so we can pair it.
+    last_half: f32,
+    have_last_half: bool,
+    /// Which phase we're committed to. We try phase 0 first; if no sync
+    /// after `phase_retry_samples` half-symbols we flip to phase 1.
+    phase: u8,
+    half_symbols_since_resync: u32,
+
+    // Differential decode state.
+    last_bit: u8,
+
+    // Block sync — sliding 26-bit window.
+    shift_reg: u32,
+    bit_index: u32,
+    /// Currently expected offset word index. 0=A, 1=B, 2=C/C', 3=D.
+    /// Block C may carry offset C' instead — the parser handles both.
+    expected_offset_idx: u8,
+    /// Group-A blocks accumulated so far, in raw 26-bit form. We only
+    /// commit them after the full 4-block sync confirms.
+    blocks: [u32; 4],
+    synced: bool,
+    /// How many bits ago we last saw a valid block — for re-sync timeouts.
+    bits_since_valid: u32,
+
+    // Decoded fields.
+    pi: u16,
+    /// PS buffer: 8 ASCII chars, 4 pairs filled separately as Group 0A
+    /// blocks arrive (address bits 0..3).
+    ps_buf: [u8; 8],
+    /// RT buffer: 64 ASCII chars, 16 quartets from Group 2A.
+    rt_buf: [u8; 64],
+    /// Track which 4-char RT segments have been received (for partial display).
+    rt_received: u32,
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+impl RdsDecoder {
+    fn new(if_rate_hz: f32) -> Self {
+        // Half-symbol clock: advance phase by HALF_BAUD/IF_RATE each IF
+        // sample; when phase ≥ 1, sample and reset.
+        let half_symbol_step = RDS_HALF_BAUD / if_rate_hz;
+        // Baseband LPFs after coherent mix. Cutoff ~2.4 kHz at IF rate, but
+        // biquads only do single-pole shaping — we pick a low Q for a wide
+        // roll-off and rely on the natural absence of strong energy outside
+        // the RDS band.
+        let i_lpf = Biquad::bandpass(2_400.0, if_rate_hz, 0.5);
+        RdsDecoder {
+            i_lpf,
+            half_symbol_phase: 0.0,
+            half_symbol_step,
+            last_half: 0.0,
+            have_last_half: false,
+            phase: 0,
+            half_symbols_since_resync: 0,
+            last_bit: 0,
+            shift_reg: 0,
+            bit_index: 0,
+            expected_offset_idx: 0,
+            blocks: [0; 4],
+            synced: false,
+            bits_since_valid: 0,
+            pi: 0,
+            ps_buf: [b' '; 8],
+            rt_buf: [b' '; 64],
+            rt_received: 0,
+        }
+    }
+
+    /// Process one MPX sample multiplied by the coherent 57 kHz reference.
+    /// Caller derives the reference from the pilot tripling (`pilot ·
+    /// ref38`, low-passed at 57 kHz). The quadrature path is a future
+    /// addition for proper PLL phase tracking; the I-only baseband works
+    /// on strong RDS signals.
+    fn process_sample(&mut self, mpx_x_ref57: f32) {
+        // Drive the I-LPF; we ignore Q for now (PLL-style alignment is
+        // a future polish item).
+        let i_baseband = self.i_lpf.process(mpx_x_ref57);
+
+        // Symbol clock.
+        self.half_symbol_phase += self.half_symbol_step;
+        if self.half_symbol_phase < 1.0 {
+            return;
+        }
+        self.half_symbol_phase -= 1.0;
+
+        // We have a new half-symbol sample.
+        self.half_symbols_since_resync += 1;
+        let this_half = i_baseband;
+
+        if !self.have_last_half {
+            self.last_half = this_half;
+            self.have_last_half = true;
+            return;
+        }
+
+        // Biphase decode happens on alternating half-symbols based on
+        // self.phase: pair (prev, curr) when (half_symbols % 2) == phase.
+        if (self.half_symbols_since_resync & 1) != u32::from(self.phase) {
+            self.last_half = this_half;
+            return;
+        }
+
+        // Pair → one channel bit. With biphase coding, a transmitted
+        // '0' is high-low (+,-) and '1' is low-high (-,+). The decision
+        // statistic is (last_half - this_half): if positive → 0, else → 1.
+        let channel_bit = u8::from(self.last_half - this_half <= 0.0);
+        self.last_half = this_half;
+
+        // Differential decode: data_bit = current XOR previous.
+        let data_bit = channel_bit ^ self.last_bit;
+        self.last_bit = channel_bit;
+
+        self.shift_in_bit(data_bit);
+    }
+
+    fn shift_in_bit(&mut self, bit: u8) {
+        // 26-bit sliding window.
+        self.shift_reg = ((self.shift_reg << 1) | u32::from(bit)) & 0x3FF_FFFF;
+        self.bit_index += 1;
+        self.bits_since_valid += 1;
+
+        if self.bit_index < RDS_BITS_PER_BLOCK {
+            return;
+        }
+
+        // Test the window against the expected offset word (when synced) or
+        // all five offsets (when searching).
+        let syndrome = rds_syndrome(self.shift_reg);
+        if self.synced {
+            // We expect a specific offset at this position.
+            let expected = match self.expected_offset_idx {
+                1 => RDS_OFFSET_B,
+                2 => RDS_OFFSET_C, // C' handled below
+                3 => RDS_OFFSET_D,
+                _ => RDS_OFFSET_A, // idx 0 plus any out-of-range (unreachable).
+            };
+            let matched = syndrome == expected
+                || (self.expected_offset_idx == 2 && syndrome == RDS_OFFSET_C_PRIME);
+            if matched {
+                self.blocks[self.expected_offset_idx as usize] = self.shift_reg;
+                self.bits_since_valid = 0;
+                if self.expected_offset_idx == 3 {
+                    self.commit_group();
+                }
+                self.expected_offset_idx = (self.expected_offset_idx + 1) % 4;
+                self.bit_index = 0;
+            } else if self.bits_since_valid > RDS_BITS_PER_BLOCK * 4 {
+                // Tolerate a single bad block before declaring loss of sync.
+                self.synced = false;
+                self.expected_offset_idx = 0;
+                self.bit_index = 0;
+                self.bits_since_valid = 0;
+            } else {
+                // Stay synced but advance to next expected block.
+                self.expected_offset_idx = (self.expected_offset_idx + 1) % 4;
+                self.bit_index = 0;
+            }
+        } else {
+            // Searching: try every offset on every bit shift.
+            for (idx, &off) in [RDS_OFFSET_A, RDS_OFFSET_B, RDS_OFFSET_C, RDS_OFFSET_D]
+                .iter()
+                .enumerate()
+            {
+                if syndrome == off {
+                    self.blocks[idx] = self.shift_reg;
+                    self.expected_offset_idx = ((idx + 1) % 4) as u8;
+                    self.bit_index = 0;
+                    self.bits_since_valid = 0;
+                    self.synced = true;
+                    return;
+                }
+            }
+            if syndrome == RDS_OFFSET_C_PRIME {
+                self.blocks[2] = self.shift_reg;
+                self.expected_offset_idx = 3;
+                self.bit_index = 0;
+                self.bits_since_valid = 0;
+                self.synced = true;
+                return;
+            }
+            // No match — let the window slide one more bit and retry.
+            self.bit_index = RDS_BITS_PER_BLOCK - 1;
+        }
+    }
+
+    fn commit_group(&mut self) {
+        // Each block is 26 bits = 16 data + 10 checkword. Strip the checkword.
+        let block_a = (self.blocks[0] >> 10) & 0xFFFF;
+        let block_b = (self.blocks[1] >> 10) & 0xFFFF;
+        let block_c = (self.blocks[2] >> 10) & 0xFFFF;
+        let block_d = (self.blocks[3] >> 10) & 0xFFFF;
+
+        // Block A: PI code.
+        self.pi = block_a as u16;
+
+        // Group type code = top 5 bits of block B (4 group + 1 A/B flag).
+        // 0A = 0b00000, 2A = 0b00100, etc.
+        let group_type = (block_b >> 11) & 0x1F;
+
+        if group_type == 0x00 {
+            // Group 0A: PS chars at address (block_b & 0x3).
+            let addr = (block_b & 0x3) as usize;
+            self.ps_buf[2 * addr] = ((block_d >> 8) & 0xFF) as u8;
+            self.ps_buf[2 * addr + 1] = (block_d & 0xFF) as u8;
+        } else if group_type == 0x04 {
+            // Group 2A: 4 RT chars at address (block_b & 0xF) × 4.
+            let addr = (block_b & 0xF) as usize;
+            if addr * 4 + 3 < self.rt_buf.len() {
+                self.rt_buf[addr * 4] = ((block_c >> 8) & 0xFF) as u8;
+                self.rt_buf[addr * 4 + 1] = (block_c & 0xFF) as u8;
+                self.rt_buf[addr * 4 + 2] = ((block_d >> 8) & 0xFF) as u8;
+                self.rt_buf[addr * 4 + 3] = (block_d & 0xFF) as u8;
+                self.rt_received |= 1 << addr;
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = RdsDecoder::new(WFM_IF_RATE);
+    }
+}
+
+/// Compute the syndrome of a 26-bit RDS codeword by polynomial division.
+/// The shift-register implementation runs in O(26) bit ops per block.
+#[allow(clippy::cast_possible_truncation)]
+fn rds_syndrome(mut codeword: u32) -> u16 {
+    // Process MSB-first.
+    let mut reg: u32 = 0;
+    let mut mask: u32 = 1 << (RDS_BITS_PER_BLOCK - 1);
+    while mask != 0 {
+        let bit = (codeword & mask) != 0;
+        let high = (reg & (1 << 9)) != 0;
+        reg = (reg << 1) & 0x3FF;
+        if bit ^ high {
+            reg ^= u32::from(RDS_GEN_POLY);
+        }
+        codeword &= !mask;
+        mask >>= 1;
+    }
+    reg as u16
+}
+
+/// Sanitize PS / RT bytes: spec uses Latin-1-like encoding with 0x20-0x7E
+/// printable. Replace anything outside ASCII printable with a space so the
+/// UI doesn't render garbage.
+fn rds_clean_byte(b: u8) -> u8 {
+    if (0x20..=0x7E).contains(&b) {
+        b
+    } else {
+        b' '
+    }
+}
+
 /// Wideband-FM demodulator with optional stereo MPX decode.
 ///
 /// Chain:
@@ -391,12 +700,17 @@ pub struct WfmDemod {
     stereo_enabled: bool,
     pilot_bpf: Biquad,
     bpf38: Biquad,
+    bpf57: Biquad,
     pilot_env: f32,
     deemph_alpha: f32,
     deemph_l: f32,
     deemph_r: f32,
     /// True when the smoothed pilot envelope is above threshold.
     stereo_locked: bool,
+
+    // RDS subsystem.
+    rds_enabled: bool,
+    rds: RdsDecoder,
 
     // Scratch buffers (reused to avoid alloc each call).
     iq_in: Vec<Complex<f32>>,
@@ -438,11 +752,15 @@ impl WfmDemod {
             stereo_enabled: true,
             pilot_bpf: Biquad::bandpass(WFM_PILOT_HZ, WFM_IF_RATE, 50.0),
             bpf38: Biquad::bandpass(WFM_LR_CARRIER_HZ, WFM_IF_RATE, 25.0),
+            bpf57: Biquad::bandpass(RDS_SUBCARRIER_HZ, WFM_IF_RATE, 25.0),
             pilot_env: 0.0,
             deemph_alpha,
             deemph_l: 0.0,
             deemph_r: 0.0,
             stereo_locked: false,
+
+            rds_enabled: true,
+            rds: RdsDecoder::new(WFM_IF_RATE),
 
             iq_in: Vec::with_capacity(65_536),
             iq_if: Vec::with_capacity(65_536 / WFM_IF_DECIM + 16),
@@ -469,6 +787,52 @@ impl WfmDemod {
     #[must_use]
     pub fn is_stereo_locked(&self) -> bool {
         self.stereo_locked
+    }
+
+    /// True once the RDS block-sync state machine has locked.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn rds_synced(&self) -> bool {
+        self.rds.synced
+    }
+
+    /// 16-bit Program Identification code from the most-recent block A.
+    /// Zero before the first sync.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn rds_pi(&self) -> u16 {
+        self.rds.pi
+    }
+
+    /// Program Service name — 8 ASCII characters, padded with spaces.
+    /// Each pair of characters arrives in a Group 0A; the buffer is updated
+    /// in place so partial PS may include leftover bytes from a previous
+    /// station for a few hundred ms after retuning.
+    #[must_use]
+    pub fn rds_ps(&self) -> String {
+        let mut s = String::with_capacity(8);
+        for &b in &self.rds.ps_buf {
+            s.push(char::from(rds_clean_byte(b)));
+        }
+        s
+    }
+
+    /// Radio Text — up to 64 ASCII characters from Group 2A. Stations may
+    /// send shorter strings terminated by 0x0D — we leave that to the
+    /// caller to trim.
+    #[must_use]
+    pub fn rds_rt(&self) -> String {
+        let mut s = String::with_capacity(64);
+        for &b in &self.rds.rt_buf {
+            s.push(char::from(rds_clean_byte(b)));
+        }
+        s
+    }
+
+    /// Clear the RDS decoder state. Call after a retune so leftover PS
+    /// chars from the previous station don't bleed into the new one.
+    pub fn reset_rds(&mut self) {
+        self.rds.reset();
     }
 
     /// Process a chunk of 8-bit unsigned IQ at 2.4 MS/s. Returns interleaved
@@ -528,6 +892,13 @@ impl WfmDemod {
                 0.0
             };
             self.diff_mix.push(m * ref38 * norm);
+
+            // RDS coherent reference at 57 kHz = 3× pilot. pilot · ref38
+            // contains cos(19k) + cos(57k); bpf57 picks the latter.
+            if self.rds_enabled {
+                let ref57 = self.bpf57.process(pilot * ref38);
+                self.rds.process_sample(m * ref57);
+            }
         }
 
         // 4) Audio-rate filtering + decimation. Sum path uses raw MPX; diff

@@ -97,8 +97,15 @@
 
   let unsubRecAudio: (() => void) | null = null;
   let unsubCwText: (() => void) | null = null;
+  let unsubRds: (() => void) | null = null;
   let cwDecodedText = $state('');
   let cwDecodedWpm = $state(0);
+
+  let rdsSynced = $state(false);
+  let rdsPi = $state(0);
+  let rdsPs = $state('');
+  let rdsRt = $state('');
+  let rdsStereo = $state(false);
 
   // ---- Lifecycle ----
 
@@ -256,6 +263,13 @@
       cwDecodedText = (cwDecodedText + evt.text).slice(-1500);
       cwDecodedWpm = evt.wpm;
     });
+    unsubRds = src.onRds((evt) => {
+      rdsSynced = evt.synced;
+      rdsPi = evt.pi;
+      rdsPs = evt.ps;
+      rdsRt = evt.rt;
+      rdsStereo = evt.stereo;
+    });
   }
 
   async function startAudio() {
@@ -281,11 +295,13 @@
     unsubAudio?.();
     unsubRecAudio?.();
     unsubCwText?.();
+    unsubRds?.();
     unsubStats = null;
     unsubFft = null;
     unsubAudio = null;
     unsubRecAudio = null;
     unsubCwText = null;
+    unsubRds = null;
     // If a recording was in progress, save what we have.
     if (recorder.recording) recorder.stopAndDownload();
   }
@@ -682,6 +698,47 @@
           onTune={onClickToTune}
         />
       </div>
+
+      <!-- RDS (M2.4) — only relevant in WFM mode. Shows up as soon as the
+           block sync state machine locks; PS / RT fields fill in over a few
+           seconds as the four 0A / 2A address slots come in. -->
+      {#if tuning.mode === 'wfm' && rtlStatus === 'streaming' && (rdsSynced || rdsStereo)}
+        <div
+          class="mb-3 rounded-md border border-neutral-800 bg-neutral-950 p-3 font-mono text-xs"
+          aria-label="RDS"
+        >
+          <div class="flex items-center justify-between mb-1.5 text-neutral-500 uppercase">
+            <span class="flex items-center gap-2">
+              <span>RDS</span>
+              {#if rdsSynced}
+                <span class="text-emerald-400 text-[10px]">locked</span>
+              {:else}
+                <span class="text-neutral-600 text-[10px]">searching…</span>
+              {/if}
+              {#if rdsStereo}
+                <span class="text-(--color-accent) text-[10px]">stereo</span>
+              {/if}
+            </span>
+            {#if rdsSynced && rdsPi > 0}
+              <span class="tabular-nums text-neutral-400">
+                PI 0x{rdsPi.toString(16).toUpperCase().padStart(4, '0')}
+              </span>
+            {/if}
+          </div>
+          {#if rdsSynced}
+            <div class="flex items-baseline gap-2 mb-1">
+              <span class="text-neutral-500 text-[10px] uppercase w-6">PS</span>
+              <span class="text-(--color-accent) text-base tracking-wide">{rdsPs}</span>
+            </div>
+            {#if rdsRt.trim().length > 0}
+              <div class="flex items-start gap-2">
+                <span class="text-neutral-500 text-[10px] uppercase w-6 mt-0.5">RT</span>
+                <span class="text-neutral-300 break-words flex-1">{rdsRt}</span>
+              </div>
+            {/if}
+          {/if}
+        </div>
+      {/if}
 
       <!-- CW decoder (M2.3) -->
       {#if tuning.mode === 'cw' && rtlStatus === 'streaming'}

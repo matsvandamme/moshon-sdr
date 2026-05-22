@@ -78,10 +78,22 @@ export type CwTextEvent = {
   wpm: number;
 };
 
+export type RdsEvent = {
+  synced: boolean;
+  pi: number;
+  /** Program Service name. Always 8 ASCII chars (space-padded). */
+  ps: string;
+  /** Radio Text — up to 64 ASCII chars. May contain trailing spaces. */
+  rt: string;
+  /** Stereo lock state, since the worker has it handy too. */
+  stereo: boolean;
+};
+
 export type StatsCallback = (evt: StatsEvent) => void;
 export type FftCallback = (evt: FftEvent) => void;
 export type AudioCallback = (evt: AudioEvent) => void;
 export type CwTextCallback = (evt: CwTextEvent) => void;
+export type RdsCallback = (evt: RdsEvent) => void;
 
 // USB-worker outbound message shapes (mirror usb-worker.ts).
 type UsbStarted = { kind: 'started'; actualSampleRate: number; actualFrequency: number };
@@ -95,8 +107,16 @@ type DspReady = { kind: 'ready' };
 type DspFft = { kind: 'fft'; bins: Float32Array; time: number };
 type DspAudio = { kind: 'audio'; samples: Float32Array; time: number };
 type DspCwText = { kind: 'cwText'; text: string; wpm: number };
+type DspRds = {
+  kind: 'rds';
+  synced: boolean;
+  pi: number;
+  ps: string;
+  rt: string;
+  stereo: boolean;
+};
 type DspErr = { kind: 'error'; message: string };
-type DspOutbound = DspReady | DspFft | DspAudio | DspCwText | DspErr;
+type DspOutbound = DspReady | DspFft | DspAudio | DspCwText | DspRds | DspErr;
 
 export class RtlSdrSource {
   private usbWorker: Worker | null = null;
@@ -111,6 +131,7 @@ export class RtlSdrSource {
   private fftListeners = new Set<FftCallback>();
   private audioListeners = new Set<AudioCallback>();
   private cwTextListeners = new Set<CwTextCallback>();
+  private rdsListeners = new Set<RdsCallback>();
 
   /**
    * Opens a device via the WebUSB picker. Must be called inside a user-gesture
@@ -256,6 +277,13 @@ export class RtlSdrSource {
     };
   }
 
+  onRds(cb: RdsCallback): () => void {
+    this.rdsListeners.add(cb);
+    return () => {
+      this.rdsListeners.delete(cb);
+    };
+  }
+
   private spawnWorkers(): void {
     if (!this.usbWorker) {
       this.usbWorker = new Worker(new URL('../../workers/usb-worker.ts', import.meta.url), {
@@ -321,6 +349,17 @@ export class RtlSdrSource {
       case 'cwText':
         for (const cb of this.cwTextListeners) {
           cb({ text: msg.text, wpm: msg.wpm });
+        }
+        break;
+      case 'rds':
+        for (const cb of this.rdsListeners) {
+          cb({
+            synced: msg.synced,
+            pi: msg.pi,
+            ps: msg.ps,
+            rt: msg.rt,
+            stereo: msg.stereo,
+          });
         }
         break;
       case 'error':
