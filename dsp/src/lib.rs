@@ -381,6 +381,13 @@ const RDS_OFFSET_C_PRIME: u16 = 0x350;
 const RDS_OFFSET_D: u16 = 0x1B4;
 /// Bits per RDS block (16 data + 10 checkword).
 const RDS_BITS_PER_BLOCK: u32 = 26;
+/// Half-symbols processed before flipping biphase phase while searching.
+/// At 2375 half-symbols/sec, 4000 ≈ 1.7 s. If sync hasn't happened by
+/// then, we're almost certainly on the wrong phase — try the other one.
+const RDS_PHASE_FLIP_HALF_SYMBOLS: u32 = 4000;
+/// Consecutive valid blocks required to confirm sync (after the first
+/// match). One match per ~200 bits happens by chance in noise.
+const RDS_SYNC_CONFIRM_BLOCKS: u8 = 2;
 
 /// RDS BPSK + protocol decoder. Embedded in `WfmDemod` and fed MPX samples
 /// (plus a coherent 57 kHz reference derived from the pilot) on every IF-rate
@@ -419,10 +426,13 @@ struct RdsDecoder {
     // Biphase decoder: store last half-symbol so we can pair it.
     last_half: f32,
     have_last_half: bool,
-    /// Which phase we're committed to. We try phase 0 first; if no sync
-    /// after `phase_retry_samples` half-symbols we flip to phase 1.
+    /// Which biphase phase we're committed to. 0 pairs even half-symbols
+    /// with the next; 1 pairs odd. We flip every `PHASE_FLIP_HALF_SYMBOLS`
+    /// while in Searching state until block sync confirms one is correct.
     phase: u8,
     half_symbols_since_resync: u32,
+    /// Counter for the auto-phase-flip while we're hunting for sync.
+    half_symbols_since_phase_flip: u32,
 
     // Differential decode state.
     last_bit: u8,
@@ -436,7 +446,13 @@ struct RdsDecoder {
     /// Group-A blocks accumulated so far, in raw 26-bit form. We only
     /// commit them after the full 4-block sync confirms.
     blocks: [u32; 4],
+    /// Sync state machine. False until we've seen `SYNC_CONFIRM_BLOCKS`
+    /// consecutive valid blocks at the expected spacing — guards against
+    /// the ~0.5% per-bit false-positive rate of single-offset matches.
     synced: bool,
+    /// Consecutive valid blocks seen during the pending phase, OR while
+    /// fully synced (resets on any miss).
+    consecutive_good: u8,
     /// How many bits ago we last saw a valid block — for re-sync timeouts.
     bits_since_valid: u32,
 
@@ -474,12 +490,14 @@ impl RdsDecoder {
             have_last_half: false,
             phase: 0,
             half_symbols_since_resync: 0,
+            half_symbols_since_phase_flip: 0,
             last_bit: 0,
             shift_reg: 0,
             bit_index: 0,
             expected_offset_idx: 0,
             blocks: [0; 4],
             synced: false,
+            consecutive_good: 0,
             bits_since_valid: 0,
             pi: 0,
             ps_buf: [b' '; 8],
@@ -507,6 +525,23 @@ impl RdsDecoder {
 
         // We have a new half-symbol sample.
         self.half_symbols_since_resync += 1;
+        self.half_symbols_since_phase_flip += 1;
+
+        // If we've been searching too long, the biphase phase is probably
+        // wrong — flip it and start over. Once sync confirms, the counter
+        // is reset and this stops firing.
+        if !self.synced && self.half_symbols_since_phase_flip >= RDS_PHASE_FLIP_HALF_SYMBOLS {
+            self.phase ^= 1;
+            self.half_symbols_since_phase_flip = 0;
+            // Also reset the sync state machine so a stale partial group
+            // from the wrong phase doesn't seed the new attempt.
+            self.shift_reg = 0;
+            self.bit_index = 0;
+            self.consecutive_good = 0;
+            self.expected_offset_idx = 0;
+            self.bits_since_valid = 0;
+        }
+
         let this_half = i_baseband;
 
         if !self.have_last_half {
@@ -548,34 +583,43 @@ impl RdsDecoder {
         // Test the window against the expected offset word (when synced) or
         // all five offsets (when searching).
         let syndrome = rds_syndrome(self.shift_reg);
-        if self.synced {
-            // We expect a specific offset at this position.
+
+        if self.consecutive_good > 0 {
+            // Either pending-confirm (synced=false, consecutive_good in 1..=N)
+            // or fully synced (consecutive_good >= N). Either way we expect a
+            // specific offset at this bit position. Any miss drops us all
+            // the way back to Searching — sliding past a bad block silently
+            // corrupts every subsequent decode.
             let expected = match self.expected_offset_idx {
                 1 => RDS_OFFSET_B,
                 2 => RDS_OFFSET_C, // C' handled below
                 3 => RDS_OFFSET_D,
-                _ => RDS_OFFSET_A, // idx 0 plus any out-of-range (unreachable).
+                _ => RDS_OFFSET_A, // idx 0; out-of-range is unreachable.
             };
             let matched = syndrome == expected
                 || (self.expected_offset_idx == 2 && syndrome == RDS_OFFSET_C_PRIME);
             if matched {
                 self.blocks[self.expected_offset_idx as usize] = self.shift_reg;
                 self.bits_since_valid = 0;
-                if self.expected_offset_idx == 3 {
+                self.consecutive_good = self.consecutive_good.saturating_add(1);
+                if self.consecutive_good >= RDS_SYNC_CONFIRM_BLOCKS {
+                    self.synced = true;
+                }
+                // Commit a group only after the four blocks of one group
+                // are filled in sequence (D is index 3).
+                if self.synced && self.expected_offset_idx == 3 {
                     self.commit_group();
                 }
                 self.expected_offset_idx = (self.expected_offset_idx + 1) % 4;
                 self.bit_index = 0;
-            } else if self.bits_since_valid > RDS_BITS_PER_BLOCK * 4 {
-                // Tolerate a single bad block before declaring loss of sync.
-                self.synced = false;
-                self.expected_offset_idx = 0;
-                self.bit_index = 0;
-                self.bits_since_valid = 0;
             } else {
-                // Stay synced but advance to next expected block.
-                self.expected_offset_idx = (self.expected_offset_idx + 1) % 4;
-                self.bit_index = 0;
+                // Drop sync. Start over by sliding the window 1 bit at a
+                // time and searching against all offsets.
+                self.synced = false;
+                self.consecutive_good = 0;
+                self.expected_offset_idx = 0;
+                self.bit_index = RDS_BITS_PER_BLOCK - 1;
+                self.bits_since_valid = 0;
             }
         } else {
             // Searching: try every offset on every bit shift.
@@ -588,7 +632,7 @@ impl RdsDecoder {
                     self.expected_offset_idx = ((idx + 1) % 4) as u8;
                     self.bit_index = 0;
                     self.bits_since_valid = 0;
-                    self.synced = true;
+                    self.consecutive_good = 1; // first match — pending confirmation
                     return;
                 }
             }
@@ -597,10 +641,10 @@ impl RdsDecoder {
                 self.expected_offset_idx = 3;
                 self.bit_index = 0;
                 self.bits_since_valid = 0;
-                self.synced = true;
+                self.consecutive_good = 1;
                 return;
             }
-            // No match — let the window slide one more bit and retry.
+            // No match — slide the window one more bit and retry.
             self.bit_index = RDS_BITS_PER_BLOCK - 1;
         }
     }
