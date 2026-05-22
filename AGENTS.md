@@ -86,7 +86,7 @@ Each phase ends with a tagged commit. Each milestone is roughly one PR.
 - [x] **B6** Demods: WFM (mono+stereo), NFM, AM, SSB (USB/LSB via Weaver), CW (PRD M1.3) — stereo WFM deferred to M2.
 - [x] **B7** URL hash state (`#f=…&m=…&bw=…&g=…` restored on load via `history.replaceState`); localStorage memory channels (save/recall current tuning, max 50); IARU Region 1 band overlay strip above the spectrum frequency axis; peak-dBFS S-meter with rough S-unit mapping. (PRD M1.7–M1.10)
 - [x] **B8** First-run onboarding modal with per-OS WebUSB setup steps (Windows/Zadig, macOS, Linux/udev). Detects OS from `navigator.userAgent` and defaults to that tab. Dismissal persisted in `localStorage` under `moshon.onboarding.dismissed.v1`. Header has a "Setup" button to re-open. (PRD M1.11)
-- [ ] **B9** Network IQ source: `rtl_tcp` over WebSocket bridge + Go bridge daemon released for 6 platforms (PRD M1.12, M1.13)
+- [x] **B9** Network IQ source: Go bridge daemon (`bridge/`) accepts WebSocket upgrades on `/ws`, dials the configured `rtl_tcp` server, and proxies bytes both ways. Origin allow-list defaults to the Pages URL (use `--cors-origin '*'` for trusted LANs). Browser-side `RtlTcpSource` + `network-worker.ts` parse the 12-byte dongle header, stream IQ into the SAB ring, and send 5-byte rtl_tcp commands for freq/sample-rate/gain. App.svelte has a USB/Network input-mode toggle persisted in localStorage; bridge URL is **never** in the URL hash (privacy). GoReleaser release matrix to follow in B10. (PRD M1.12)
 - [ ] **B10** Definition-of-Done validation: PRD success criteria S1–S5 confirmed. Tag `v0.1.0`.
 
 ### Phase 3 — M2 should-haves (weeks 10+)
@@ -151,9 +151,9 @@ These are non-negotiable. Violating any of them is a stop-the-line event.
 - B1a: cleanup + project identity (LICENSE, README, .gitignore, etc.)
 - B1c: scaffold `web/` (Svelte 5 + Vite + Tailwind 4 + lucide-svelte), `dsp/` (Cargo crate stub with `smoke()` export), `bridge/` (Go module + stub main.go)
 - B1d: four GitHub Actions workflows (ci, deploy, bridge-release, claude-review) + GoReleaser config
-**Currently working on:** B8 shipped (first-run WebUSB onboarding). Ready for B9 (network IQ via rtl_tcp + Go bridge daemon).
+**Currently working on:** B9 shipped (Go bridge + WebSocket source). Ready for B10 (DoD validation + GoReleaser release matrix + `v0.1.0` tag).
 **Blocked by:** None.
-**Verification pending:** (1) B6 hardware tests for all six modes; (2) URL share — copy hash to incognito and confirm tuning restores; (3) memory channel survives reload; (4) S-meter responds to a known signal; (5) onboarding modal opens on first visit and dismisses cleanly.
+**Verification pending:** (1) B6 hardware tests for all six modes; (2) URL share; (3) memory channel survives reload; (4) S-meter responds; (5) onboarding modal; (6) B9 end-to-end — run `moshon-bridge`, host `rtl_tcp -a 127.0.0.1`, connect Pages site over local WS, confirm spectrum + audio flow.
 
 ## Agent behavior baseline
 

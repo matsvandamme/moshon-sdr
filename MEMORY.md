@@ -35,6 +35,14 @@ Long-running notes that should survive across sessions but don't belong in the f
 - NFM/AM/SSB/CW are mode-cycle UI only — actual demod lands in B6b–B6d.
 - Next milestone: **B6b** — NFM + AM demods (much simpler than WFM; single-stage envelope/quadrature demods on the existing channelizer chain).
 
+**As of B9 (network IQ + Go bridge):**
+- B9 shipped. `bridge/main.go` is a single-binary HTTP/WebSocket proxy on `127.0.0.1:9090` (default). `/ws` upgrades a WebSocket and pipes bytes to/from `rtl_tcp` (configurable target, default `127.0.0.1:1234`). `--cors-origin` defaults to the Pages URL; use `*` for trusted LANs only.
+- Single Go dep: `github.com/coder/websocket` (modern fork of nhooyr/websocket). Stdlib doesn't ship WebSocket.
+- Browser side: `network-worker.ts` opens the WS, parses the 12-byte `RTL0` header, then streams IQ bytes into the same SAB ring the DSP worker drains. Commands (set freq/sample rate/gain mode/gain) go out as 5-byte binary frames. `RtlTcpSource` mirrors `RtlSdrSource`'s public API so App.svelte can switch between them via an `activeSource()` helper.
+- Bridge URL + rtl_tcp target + inputMode persist in `localStorage` under `moshon.bridgeUrl.v1` / `moshon.rtltcpTarget.v1` / `moshon.inputMode.v1`. **Bridge URL is NEVER stored in the URL hash** — privacy decision.
+- Gotcha: `e.data` from a WebSocket onmessage is `ArrayBuffer`; `Uint8Array.subarray()` may return `Uint8Array<ArrayBufferLike>` which strict TS won't assign back to a `Uint8Array<ArrayBuffer>` typed variable. Fix is to introduce a fresh `let payload: Uint8Array` and assign different branches separately rather than reusing the narrowed binding.
+- Next milestone: **B10** — DoD validation against PRD success criteria S1-S5, GoReleaser release for 6 platforms, tag `v0.1.0`.
+
 **As of B8 (first-run onboarding):**
 - B8 shipped. `Onboarding.svelte` is a modal with three tabs (Windows/macOS/Linux). Default tab picked from `navigator.userAgent`. Dismissal persists in `localStorage` under `moshon.onboarding.dismissed.v1`.
 - Auto-opens on first visit; header "Setup" button re-opens it.

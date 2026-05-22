@@ -12,10 +12,13 @@
     Volume2,
     VolumeX,
     HelpCircle,
+    Usb,
+    Wifi,
   } from 'lucide-svelte';
   import { onMount, onDestroy } from 'svelte';
   import init, { smoke } from './lib/dsp/wasm/moshon_dsp.js';
   import { RtlSdrSource, type RtlSdrStatus } from './lib/usb/rtlsdr-source';
+  import { RtlTcpSource } from './lib/usb/rtltcp-source';
   import type { ColormapName } from './lib/visualizer/spectrum-waterfall';
   import {
     tuning,
@@ -29,6 +32,7 @@
   import SpectrumWaterfall from './lib/ui/SpectrumWaterfall.svelte';
   import MemoryChannels from './lib/ui/MemoryChannels.svelte';
   import Onboarding from './lib/ui/Onboarding.svelte';
+  import NetworkConnect from './lib/ui/NetworkConnect.svelte';
   import { AudioPipeline } from './lib/audio/audio-pipeline';
   import { readHash, writeHash } from './lib/state/url-hash';
   import { peakDbInChannel, dbToSUnit } from './lib/dsp/smeter';
@@ -44,7 +48,20 @@
   const FFT_SIZE = 2048;
   const FFT_RATE_HZ = 30;
 
-  const source = new RtlSdrSource();
+  // Two sources: WebUSB (local dongle) and rtl_tcp-over-WebSocket (remote
+  // bridge). Both expose the same listener interface; we switch which one
+  // we drive based on the inputMode toggle.
+  const usbSource = new RtlSdrSource();
+  const netSource = new RtlTcpSource();
+  type InputMode = 'usb' | 'network';
+  let inputMode = $state<InputMode>('usb');
+  let bridgeUrl = $state('http://127.0.0.1:9090');
+  let rtlTcpTarget = $state('');
+
+  function activeSource(): RtlSdrSource | RtlTcpSource {
+    return inputMode === 'usb' ? usbSource : netSource;
+  }
+
   const audio = new AudioPipeline();
   let volume = $state(0.6);
 
@@ -84,6 +101,12 @@
       if (localStorage.getItem('moshon.onboarding.dismissed.v1') !== '1') {
         onboardingOpen = true;
       }
+      const savedBridgeUrl = localStorage.getItem('moshon.bridgeUrl.v1');
+      if (savedBridgeUrl) bridgeUrl = savedBridgeUrl;
+      const savedTarget = localStorage.getItem('moshon.rtltcpTarget.v1');
+      if (savedTarget !== null) rtlTcpTarget = savedTarget;
+      const savedMode = localStorage.getItem('moshon.inputMode.v1');
+      if (savedMode === 'usb' || savedMode === 'network') inputMode = savedMode;
     } catch {
       // localStorage unavailable — skip onboarding entirely rather than
       // forcing it on every load.
@@ -119,11 +142,28 @@
     });
   });
 
+  // Persist bridge connection inputs. Bridge URL/target intentionally live in
+  // localStorage and NOT the URL hash — see the no-bridge-in-hash decision
+  // in MEMORY.md.
+  $effect(() => {
+    const url = bridgeUrl;
+    const tgt = rtlTcpTarget;
+    const mode = inputMode;
+    try {
+      localStorage.setItem('moshon.bridgeUrl.v1', url);
+      localStorage.setItem('moshon.rtltcpTarget.v1', tgt);
+      localStorage.setItem('moshon.inputMode.v1', mode);
+    } catch {
+      // ignore
+    }
+  });
+
   onDestroy(() => {
     cancelAnimationFrame(rafHandle);
     unsubStats?.();
     unsubFft?.();
-    void source.disconnect();
+    void usbSource.disconnect();
+    void netSource.disconnect();
     void audio.close();
   });
 
@@ -142,16 +182,15 @@
   });
 
   // ---- Retune effects ----
-  // When centerFreq or gain change while streaming, push them to the USB
-  // worker without restarting the stream. The initial values are set by
-  // start() so this only fires on subsequent changes.
+  // When centerFreq or gain change while streaming, push them to whichever
+  // source is currently active without restarting the stream.
   $effect(() => {
     const f = tuning.centerFreq;
-    if (rtlStatus === 'streaming') source.retune({ centerFreq: f });
+    if (rtlStatus === 'streaming') activeSource().retune({ centerFreq: f });
   });
   $effect(() => {
     const g = tuning.gain;
-    if (rtlStatus === 'streaming') source.retune({ gain: g });
+    if (rtlStatus === 'streaming') activeSource().retune({ gain: g });
   });
 
   // Push mode + bandwidth changes to the DSP worker without restarting.
@@ -160,7 +199,7 @@
   $effect(() => {
     const m = tuning.mode;
     const bw = tuning.bandwidth;
-    if (rtlStatus === 'streaming') source.setMode(m, bw);
+    if (rtlStatus === 'streaming') activeSource().setMode(m, bw);
   });
 
   // ---- Render loop (now just for elapsed timer) ----
@@ -174,11 +213,61 @@
 
   // ---- Button actions ----
 
+  function resetStreamCounters() {
+    rtlError = null;
+    bytesWritten = 0;
+    bytesDropped = 0;
+    fftFramesRendered = 0;
+    streamStartMs = performance.now();
+    elapsedMs = 0;
+  }
+
+  function wireStreamListeners() {
+    const src = activeSource();
+    unsubStats?.();
+    unsubFft?.();
+    unsubStats = src.onStats((s) => {
+      bytesWritten = s.bytesWritten;
+      bytesDropped = s.bytesDropped;
+    });
+    unsubFft = src.onFft((evt) => {
+      latestBins = evt.bins;
+      fftFramesRendered++;
+    });
+  }
+
+  async function startAudio() {
+    // AudioContext can only be created from a user gesture, so do it here
+    // (inside the Start click handler). Idempotent if already up.
+    await audio.init();
+    audio.setVolume(volume);
+    audio.setMuted(tuning.muted);
+
+    unsubAudio?.();
+    unsubAudio = audio.onStats((s) => {
+      audioSamplesPlayed = s.samplesPlayed;
+      audioUnderrun = s.samplesUnderrun;
+      audioRingUsed = s.ringUsedBytes;
+      audioWorkletReady = audio.isWorkletReady;
+    });
+  }
+
+  function clearStreamCleanup() {
+    cancelAnimationFrame(rafHandle);
+    unsubStats?.();
+    unsubFft?.();
+    unsubAudio?.();
+    unsubStats = null;
+    unsubFft = null;
+    unsubAudio = null;
+  }
+
   async function onConnect() {
+    // USB path only — the WebUSB picker needs a user gesture.
     rtlError = null;
     rtlStatus = 'connecting';
     try {
-      await source.connect();
+      await usbSource.connect();
       rtlStatus = 'connected';
     } catch (err) {
       rtlStatus = 'error';
@@ -187,43 +276,14 @@
   }
 
   async function onStart() {
-    rtlError = null;
-    bytesWritten = 0;
-    bytesDropped = 0;
-    fftFramesRendered = 0;
-    streamStartMs = performance.now();
-    elapsedMs = 0;
-
-    unsubStats?.();
-    unsubFft?.();
-    unsubStats = source.onStats((s) => {
-      bytesWritten = s.bytesWritten;
-      bytesDropped = s.bytesDropped;
-    });
-    unsubFft = source.onFft((evt) => {
-      latestBins = evt.bins;
-      fftFramesRendered++;
-    });
-
+    resetStreamCounters();
+    wireStreamListeners();
     rafHandle = requestAnimationFrame(tick);
 
     try {
-      // AudioContext can only be created from a user gesture, so do it here
-      // (inside the Start click handler). Idempotent if already up.
-      await audio.init();
-      audio.setVolume(volume);
-      audio.setMuted(tuning.muted);
-
-      unsubAudio?.();
-      unsubAudio = audio.onStats((s) => {
-        audioSamplesPlayed = s.samplesPlayed;
-        audioUnderrun = s.samplesUnderrun;
-        audioRingUsed = s.ringUsedBytes;
-        audioWorkletReady = audio.isWorkletReady;
-      });
-
+      await startAudio();
       rtlStatus = 'streaming';
-      await source.start({
+      await usbSource.start({
         sampleRate: SAMPLE_RATE,
         centerFreq: tuning.centerFreq,
         gain: tuning.gain,
@@ -236,13 +296,35 @@
     } catch (err) {
       rtlStatus = 'error';
       rtlError = err instanceof Error ? err.message : String(err);
-      cancelAnimationFrame(rafHandle);
-      unsubStats?.();
-      unsubFft?.();
-      unsubAudio?.();
-      unsubStats = null;
-      unsubFft = null;
-      unsubAudio = null;
+      clearStreamCleanup();
+    }
+  }
+
+  async function onConnectNetwork() {
+    resetStreamCounters();
+    wireStreamListeners();
+    rafHandle = requestAnimationFrame(tick);
+    rtlStatus = 'connecting';
+
+    try {
+      await startAudio();
+      await netSource.start({
+        bridgeUrl,
+        rtlTcpTarget: rtlTcpTarget.trim() || undefined,
+        sampleRate: SAMPLE_RATE,
+        centerFreq: tuning.centerFreq,
+        gain: tuning.gain,
+        fftSize: FFT_SIZE,
+        fftRateHz: FFT_RATE_HZ,
+        mode: tuning.mode,
+        bandwidthHz: tuning.bandwidth,
+        audioRing: audio.ring!.buffer,
+      });
+      rtlStatus = 'streaming';
+    } catch (err) {
+      rtlStatus = 'error';
+      rtlError = err instanceof Error ? err.message : String(err);
+      clearStreamCleanup();
     }
   }
 
@@ -250,19 +332,15 @@
     cancelAnimationFrame(rafHandle);
     rtlStatus = 'closing';
     try {
-      await source.stop();
-      await source.disconnect();
+      const src = activeSource();
+      await src.stop();
+      await src.disconnect();
       rtlStatus = 'idle';
     } catch (err) {
       rtlStatus = 'error';
       rtlError = err instanceof Error ? err.message : String(err);
     } finally {
-      unsubStats?.();
-      unsubFft?.();
-      unsubAudio?.();
-      unsubStats = null;
-      unsubFft = null;
-      unsubAudio = null;
+      clearStreamCleanup();
     }
   }
 
@@ -274,7 +352,7 @@
     unsubFft = null;
     rtlStatus = 'closing';
     try {
-      await source.disconnect();
+      await activeSource().disconnect();
       rtlStatus = 'idle';
       bytesWritten = 0;
       bytesDropped = 0;
@@ -452,22 +530,66 @@
           <Keyboard size={12} />
           <span>?</span>
         </button>
-        <span class="font-mono text-xs text-neutral-500">B3 · B4 · B5 · B6 · B7 · B8</span>
+        <span class="font-mono text-xs text-neutral-500">B3 · B4 · B5 · B6 · B7 · B8 · B9</span>
       </div>
     </header>
 
     {#if rtlStatus === 'idle'}
-      <p class="text-sm text-neutral-400 mb-4">
-        Plug in an RTL-SDR Blog v3/v4 dongle and click Connect.
-      </p>
-      <button
-        type="button"
-        onclick={onConnect}
-        class="inline-flex items-center gap-2 rounded-md bg-(--color-accent) text-neutral-950 px-4 py-2 text-sm font-medium hover:bg-(--color-accent-strong) cursor-pointer"
-      >
-        <Plug size={16} />
-        Connect RTL-SDR
-      </button>
+      <!-- Input mode picker (USB dongle vs network bridge) -->
+      <div class="flex gap-1 mb-4 text-xs font-mono">
+        <button
+          type="button"
+          onclick={() => (inputMode = 'usb')}
+          class="inline-flex items-center gap-1.5 rounded px-3 py-1.5 cursor-pointer"
+          class:bg-neutral-800={inputMode === 'usb'}
+          class:border-neutral-600={inputMode === 'usb'}
+          class:text-neutral-100={inputMode === 'usb'}
+          class:bg-neutral-950={inputMode !== 'usb'}
+          class:border-neutral-800={inputMode !== 'usb'}
+          class:text-neutral-400={inputMode !== 'usb'}
+          style="border-width: 1px; border-style: solid;"
+          aria-pressed={inputMode === 'usb'}
+        >
+          <Usb size={12} />
+          Local USB
+        </button>
+        <button
+          type="button"
+          onclick={() => (inputMode = 'network')}
+          class="inline-flex items-center gap-1.5 rounded px-3 py-1.5 cursor-pointer"
+          class:bg-neutral-800={inputMode === 'network'}
+          class:border-neutral-600={inputMode === 'network'}
+          class:text-neutral-100={inputMode === 'network'}
+          class:bg-neutral-950={inputMode !== 'network'}
+          class:border-neutral-800={inputMode !== 'network'}
+          class:text-neutral-400={inputMode !== 'network'}
+          style="border-width: 1px; border-style: solid;"
+          aria-pressed={inputMode === 'network'}
+        >
+          <Wifi size={12} />
+          Network (rtl_tcp)
+        </button>
+      </div>
+
+      {#if inputMode === 'usb'}
+        <p class="text-sm text-neutral-400 mb-4">
+          Plug in an RTL-SDR Blog v3/v4 dongle and click Connect.
+        </p>
+        <button
+          type="button"
+          onclick={onConnect}
+          class="inline-flex items-center gap-2 rounded-md bg-(--color-accent) text-neutral-950 px-4 py-2 text-sm font-medium hover:bg-(--color-accent-strong) cursor-pointer"
+        >
+          <Plug size={16} />
+          Connect RTL-SDR
+        </button>
+      {:else}
+        <NetworkConnect
+          bind:bridgeUrl
+          bind:rtlTcpTarget
+          onConnect={onConnectNetwork}
+        />
+      {/if}
     {:else if rtlStatus === 'connecting'}
       <div class="flex items-center gap-2 text-sm text-neutral-300">
         <Loader2 size={16} class="animate-spin" />
@@ -720,7 +842,7 @@
   </section>
 
   <p class="text-xs text-neutral-500 max-w-lg text-center">
-    Pre-alpha · B8 complete · Press <kbd class="font-mono text-neutral-300">?</kbd> for shortcuts.
+    Pre-alpha · B9 complete · Press <kbd class="font-mono text-neutral-300">?</kbd> for shortcuts.
     <br />
     <a
       href="https://github.com/matsvandamme/moshon-sdr/blob/main/AGENTS.md"
