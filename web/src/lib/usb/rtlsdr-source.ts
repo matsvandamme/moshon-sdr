@@ -72,9 +72,16 @@ export type AudioEvent = {
   time: number;
 };
 
+export type CwTextEvent = {
+  text: string;
+  /** Estimated words-per-minute from the decoder. */
+  wpm: number;
+};
+
 export type StatsCallback = (evt: StatsEvent) => void;
 export type FftCallback = (evt: FftEvent) => void;
 export type AudioCallback = (evt: AudioEvent) => void;
+export type CwTextCallback = (evt: CwTextEvent) => void;
 
 // USB-worker outbound message shapes (mirror usb-worker.ts).
 type UsbStarted = { kind: 'started'; actualSampleRate: number; actualFrequency: number };
@@ -87,8 +94,9 @@ type UsbOutbound = UsbStarted | UsbStats | UsbStopped | UsbErr;
 type DspReady = { kind: 'ready' };
 type DspFft = { kind: 'fft'; bins: Float32Array; time: number };
 type DspAudio = { kind: 'audio'; samples: Float32Array; time: number };
+type DspCwText = { kind: 'cwText'; text: string; wpm: number };
 type DspErr = { kind: 'error'; message: string };
-type DspOutbound = DspReady | DspFft | DspAudio | DspErr;
+type DspOutbound = DspReady | DspFft | DspAudio | DspCwText | DspErr;
 
 export class RtlSdrSource {
   private usbWorker: Worker | null = null;
@@ -102,6 +110,7 @@ export class RtlSdrSource {
   private statsListeners = new Set<StatsCallback>();
   private fftListeners = new Set<FftCallback>();
   private audioListeners = new Set<AudioCallback>();
+  private cwTextListeners = new Set<CwTextCallback>();
 
   /**
    * Opens a device via the WebUSB picker. Must be called inside a user-gesture
@@ -240,6 +249,13 @@ export class RtlSdrSource {
     };
   }
 
+  onCwText(cb: CwTextCallback): () => void {
+    this.cwTextListeners.add(cb);
+    return () => {
+      this.cwTextListeners.delete(cb);
+    };
+  }
+
   private spawnWorkers(): void {
     if (!this.usbWorker) {
       this.usbWorker = new Worker(new URL('../../workers/usb-worker.ts', import.meta.url), {
@@ -300,6 +316,11 @@ export class RtlSdrSource {
       case 'audio':
         for (const cb of this.audioListeners) {
           cb({ samples: msg.samples, time: msg.time });
+        }
+        break;
+      case 'cwText':
+        for (const cb of this.cwTextListeners) {
+          cb({ text: msg.text, wpm: msg.wpm });
         }
         break;
       case 'error':

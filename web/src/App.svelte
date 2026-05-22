@@ -96,6 +96,9 @@
   let onboardingOpen = $state(false);
 
   let unsubRecAudio: (() => void) | null = null;
+  let unsubCwText: (() => void) | null = null;
+  let cwDecodedText = $state('');
+  let cwDecodedWpm = $state(0);
 
   // ---- Lifecycle ----
 
@@ -247,6 +250,12 @@
         onRecordToggle();
       }
     });
+    unsubCwText = src.onCwText((evt) => {
+      // Cap the visible window so the buffer doesn't grow unbounded on
+      // long sessions. Keep the most recent ~1500 chars.
+      cwDecodedText = (cwDecodedText + evt.text).slice(-1500);
+      cwDecodedWpm = evt.wpm;
+    });
   }
 
   async function startAudio() {
@@ -271,13 +280,24 @@
     unsubFft?.();
     unsubAudio?.();
     unsubRecAudio?.();
+    unsubCwText?.();
     unsubStats = null;
     unsubFft = null;
     unsubAudio = null;
     unsubRecAudio = null;
+    unsubCwText = null;
     // If a recording was in progress, save what we have.
     if (recorder.recording) recorder.stopAndDownload();
   }
+
+  // Wipe the decoded buffer whenever the user leaves CW mode so they don't
+  // see stale text next time they tune back.
+  $effect(() => {
+    if (tuning.mode !== 'cw') {
+      cwDecodedText = '';
+      cwDecodedWpm = 0;
+    }
+  });
 
   function onRecordToggle() {
     if (recorder.recording) {
@@ -662,6 +682,32 @@
           onTune={onClickToTune}
         />
       </div>
+
+      <!-- CW decoder (M2.3) -->
+      {#if tuning.mode === 'cw' && rtlStatus === 'streaming'}
+        <div
+          class="mb-3 rounded-md border border-neutral-800 bg-neutral-950 p-3 font-mono text-xs"
+          aria-label="CW decode"
+        >
+          <div class="flex items-center justify-between mb-1.5 text-neutral-500 uppercase">
+            <span>CW decode</span>
+            <span class="tabular-nums">
+              {cwDecodedWpm > 0 ? `~${cwDecodedWpm.toFixed(0)} WPM` : ''}
+              <button
+                type="button"
+                onclick={() => (cwDecodedText = '')}
+                class="ml-2 text-neutral-600 hover:text-neutral-200 cursor-pointer"
+                title="Clear decoded text"
+              >clear</button>
+            </span>
+          </div>
+          <div
+            class="max-h-24 overflow-y-auto text-(--color-accent) leading-relaxed whitespace-pre-wrap break-words"
+          >
+            {cwDecodedText || '…listening…'}
+          </div>
+        </div>
+      {/if}
 
       <!-- S-meter (B7) -->
       {#if rtlStatus === 'streaming' && Number.isFinite(signalDb)}

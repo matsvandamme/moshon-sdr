@@ -50,9 +50,15 @@ export type AudioEvent = {
   time: number;
 };
 
+export type CwTextEvent = {
+  text: string;
+  wpm: number;
+};
+
 export type StatsCallback = (evt: StatsEvent) => void;
 export type FftCallback = (evt: FftEvent) => void;
 export type AudioCallback = (evt: AudioEvent) => void;
+export type CwTextCallback = (evt: CwTextEvent) => void;
 
 // Mirror outbound shapes from network-worker.ts.
 type NetStarted = { kind: 'started'; tunerType: number; tunerGainCount: number };
@@ -65,8 +71,9 @@ type NetOutbound = NetStarted | NetStats | NetStopped | NetErr;
 type DspReady = { kind: 'ready' };
 type DspFft = { kind: 'fft'; bins: Float32Array; time: number };
 type DspAudio = { kind: 'audio'; samples: Float32Array; time: number };
+type DspCwText = { kind: 'cwText'; text: string; wpm: number };
 type DspErr = { kind: 'error'; message: string };
-type DspOutbound = DspReady | DspFft | DspAudio | DspErr;
+type DspOutbound = DspReady | DspFft | DspAudio | DspCwText | DspErr;
 
 export class RtlTcpSource {
   private netWorker: Worker | null = null;
@@ -78,6 +85,7 @@ export class RtlTcpSource {
   private statsListeners = new Set<StatsCallback>();
   private fftListeners = new Set<FftCallback>();
   private audioListeners = new Set<AudioCallback>();
+  private cwTextListeners = new Set<CwTextCallback>();
 
   /** Construct the WebSocket URL from a bridge base URL + optional target. */
   static buildWsUrl(bridgeUrl: string, rtlTcpTarget?: string): string {
@@ -189,6 +197,13 @@ export class RtlTcpSource {
     };
   }
 
+  onCwText(cb: CwTextCallback): () => void {
+    this.cwTextListeners.add(cb);
+    return () => {
+      this.cwTextListeners.delete(cb);
+    };
+  }
+
   private spawnWorkers(): void {
     if (!this.netWorker) {
       this.netWorker = new Worker(
@@ -248,6 +263,11 @@ export class RtlTcpSource {
       case 'audio':
         for (const cb of this.audioListeners) {
           cb({ samples: msg.samples, time: msg.time });
+        }
+        break;
+      case 'cwText':
+        for (const cb of this.cwTextListeners) {
+          cb({ text: msg.text, wpm: msg.wpm });
         }
         break;
       case 'error':

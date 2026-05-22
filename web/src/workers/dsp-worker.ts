@@ -23,6 +23,7 @@ import init, {
   WfmDemod,
 } from '../lib/dsp/wasm/moshon_dsp.js';
 import { SabRing } from '../lib/ring/sab-ring';
+import { CwDecoder } from '../lib/dsp/cw-decoder';
 
 export type DemodMode = 'wfm' | 'nfm' | 'am' | 'usb' | 'lsb' | 'cw';
 
@@ -44,8 +45,14 @@ type Inbound = InboundInit | InboundSetMode | InboundStop | InboundSetRecording;
 type OutboundReady = { kind: 'ready' };
 type OutboundFft = { kind: 'fft'; bins: Float32Array; time: number };
 type OutboundAudio = { kind: 'audio'; samples: Float32Array; time: number };
+type OutboundCwText = { kind: 'cwText'; text: string; wpm: number };
 type OutboundError = { kind: 'error'; message: string };
-type Outbound = OutboundReady | OutboundFft | OutboundAudio | OutboundError;
+type Outbound =
+  | OutboundReady
+  | OutboundFft
+  | OutboundAudio
+  | OutboundCwText
+  | OutboundError;
 
 type Demod = {
   process(iq: Uint8Array): Float32Array;
@@ -78,6 +85,7 @@ let running = false;
 let minPostIntervalMs = 33;
 let lastPostMs = 0;
 let recording = false;
+let cwDecoder: CwDecoder | null = null;
 
 function postOut(msg: Outbound, transfer: Transferable[] = []) {
   self.postMessage(msg, { transfer });
@@ -118,6 +126,23 @@ function rebuildDemod(mode: DemodMode, bandwidthHz: number) {
   demod = buildDemod(mode, bandwidthHz);
   currentMode = mode;
   currentBandwidth = bandwidthHz;
+  // Reset the CW decoder state on mode change so leftover patterns from a
+  // previous CW session don't bleed into the next one.
+  cwDecoder?.reset();
+}
+
+/**
+ * Feed a mono Float32Array (or the L channel of an interleaved stereo
+ * buffer) into the CW decoder. Posts a `cwText` message if any characters
+ * were produced.
+ */
+function maybeDecodeCw(mono: Float32Array) {
+  if (currentMode !== 'cw' || mono.length === 0) return;
+  if (!cwDecoder) cwDecoder = new CwDecoder();
+  const text = cwDecoder.process(mono);
+  if (text.length > 0) {
+    postOut({ kind: 'cwText', text, wpm: cwDecoder.currentWpm });
+  }
 }
 
 async function setup(opts: InboundInit) {
@@ -180,6 +205,9 @@ async function processLoop() {
       const bytes = new Uint8Array(stereo.buffer, stereo.byteOffset, stereo.byteLength);
       audioRing.write(bytes);
       maybeTapForRecording(stereo);
+      // CW is always mono-from-demod (we duplicated above to L=R); feed
+      // the raw mono buffer to the decoder.
+      if (currentMode === 'cw') maybeDecodeCw(audio);
     }
 
     // Drain AT MOST one backlog chunk per iteration. Draining the entire
@@ -203,6 +231,7 @@ async function processLoop() {
           );
           audioRing.write(moreBytes);
           maybeTapForRecording(stereoMore);
+          if (currentMode === 'cw') maybeDecodeCw(audioMore);
         }
       } catch (err) {
         running = false;
