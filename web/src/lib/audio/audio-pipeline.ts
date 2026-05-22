@@ -11,8 +11,9 @@ import { SabRing } from '../ring/sab-ring';
 const AUDIO_PROCESSOR_URL = '/audio-processor.js';
 const AUDIO_RATE = 48_000;
 
-/** PCM ring capacity in bytes. 48000 floats × 4 = 192 kB, ~1 sec of audio. */
-const PCM_RING_CAPACITY = 192_000;
+/** PCM ring capacity in bytes. Stereo 48 kHz: 2 channels × 4 bytes × 48000
+ *  = 384 kB per second of audio. We size at ~1 s. */
+const PCM_RING_CAPACITY = 384_000;
 
 export type AudioStats = {
   samplesPlayed: number;
@@ -71,7 +72,7 @@ export class AudioPipeline {
     this.workletNode = new AudioWorkletNode(this.ctx, 'moshon-pcm-player', {
       numberOfInputs: 0,
       numberOfOutputs: 1,
-      outputChannelCount: [1],
+      outputChannelCount: [2],
       processorOptions: { sab: this.ring.buffer },
     });
     this.workletNode.port.onmessage = (e) => {

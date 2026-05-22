@@ -50,6 +50,21 @@ type Demod = {
   free(): void;
 };
 
+/**
+ * Build a stereo (interleaved L,R,L,R,…) Float32Array from a mono input.
+ * WfmDemod already produces interleaved output; every other demod returns
+ * mono, so we duplicate each sample into both channels here. The audio
+ * ring layout is always stereo.
+ */
+function monoToInterleavedStereo(mono: Float32Array): Float32Array {
+  const out = new Float32Array(mono.length * 2);
+  for (let i = 0; i < mono.length; i++) {
+    out[2 * i] = mono[i];
+    out[2 * i + 1] = mono[i];
+  }
+  return out;
+}
+
 let iqRing: SabRing | null = null;
 let audioRing: SabRing | null = null;
 let fft: FftContext | null = null;
@@ -143,9 +158,12 @@ async function processLoop() {
       return;
     }
 
-    // Push audio bytes into the audio ring (zero-copy via Uint8Array view).
+    // Push audio bytes into the audio ring. WFM returns interleaved stereo
+    // already; everything else returns mono and we duplicate to L=R here.
     if (audio.length > 0) {
-      const bytes = new Uint8Array(audio.buffer, audio.byteOffset, audio.byteLength);
+      const stereo =
+        currentMode === 'wfm' ? audio : monoToInterleavedStereo(audio);
+      const bytes = new Uint8Array(stereo.buffer, stereo.byteOffset, stereo.byteLength);
       audioRing.write(bytes);
     }
 
@@ -161,10 +179,12 @@ async function processLoop() {
       try {
         const audioMore = demod.process(demodScratch);
         if (audioMore.length > 0) {
+          const stereoMore =
+            currentMode === 'wfm' ? audioMore : monoToInterleavedStereo(audioMore);
           const moreBytes = new Uint8Array(
-            audioMore.buffer,
-            audioMore.byteOffset,
-            audioMore.byteLength,
+            stereoMore.buffer,
+            stereoMore.byteOffset,
+            stereoMore.byteLength,
           );
           audioRing.write(moreBytes);
         }

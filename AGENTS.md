@@ -90,6 +90,7 @@ Each phase ends with a tagged commit. Each milestone is roughly one PR.
 - [x] **B10** Definition-of-Done validation drafted in [docs/DoD-v0.1.0.md](docs/DoD-v0.1.0.md). S4 + S5 verified in code; S1 deferred (adoption metric); S2 + S3 pending the author's hardware test. Tagging `v0.1.0` + `bridge-v0.1.0` waits on the manual checklist.
 
 ### Phase 3 — M2 should-haves (weeks 10+)
+- [x] **M2.0** Stereo WFM (completes the deferred half of M1.3). Adds 19 kHz pilot detection via biquad BPF, coherent 38 kHz reference recovered by squaring + biquad BPF, dynamic normalization keyed off the smoothed pilot envelope, 50 µs de-emphasis. Output path is now interleaved L,R at 48 kHz across the whole DSP→worklet chain; non-WFM demods duplicate to L=R so the layout is uniform.
 - [ ] HackRF One driver
 - [ ] ADS-B mode (`/adsb` route, lazy WASM)
 - [ ] RDS for WFM

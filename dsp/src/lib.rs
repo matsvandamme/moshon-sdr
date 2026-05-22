@@ -234,6 +234,54 @@ impl ComplexFir {
     }
 }
 
+/// Direct-form-I biquad. Used in stereo WFM for the narrow pilot and 38 kHz
+/// reference BPFs — much cheaper than a long FIR at the equivalent Q.
+struct Biquad {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl Biquad {
+    /// RBJ-cookbook bandpass (constant skirt gain). `f_center_hz` and
+    /// `sample_rate_hz` in the obvious units; `q` is the quality factor
+    /// (higher = narrower).
+    fn bandpass(f_center_hz: f32, sample_rate_hz: f32, q: f32) -> Self {
+        let w0 = 2.0 * PI * f_center_hz / sample_rate_hz;
+        let alpha = w0.sin() / (2.0 * q);
+        let cos_w0 = w0.cos();
+        let a0 = 1.0 + alpha;
+        Self {
+            b0: alpha / a0,
+            b1: 0.0,
+            b2: -alpha / a0,
+            a1: -2.0 * cos_w0 / a0,
+            a2: (1.0 - alpha) / a0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+
+    fn process(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
 /// Complex-valued FIR decimator (separate I and Q sub-filters sharing taps).
 struct ComplexDecimator {
     factor: usize,
@@ -282,7 +330,7 @@ impl ComplexDecimator {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// WFM demodulator (B6a)
+// WFM demodulator (B6a mono · M2.0 stereo)
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Input sample rate the demodulator is configured for. Used by tests; may
@@ -302,22 +350,62 @@ const WFM_IF_DECIM: usize = 10;
 const WFM_AUDIO_DECIM: usize = 5;
 /// Standard broadcast FM peak deviation.
 const WFM_DEVIATION: f32 = 75_000.0;
+/// Stereo pilot tone frequency.
+const WFM_PILOT_HZ: f32 = 19_000.0;
+/// Stereo L-R DSB-SC suppressed carrier (= 2 × pilot).
+const WFM_LR_CARRIER_HZ: f32 = 38_000.0;
+/// Pilot detection threshold on the smoothed |pilot| envelope. Empirical
+/// — typical pilots run ~5-15 % of full MPX amplitude.
+const WFM_PILOT_THRESHOLD: f32 = 0.02;
+/// Smoothing for the pilot envelope. Lower = faster lock / faster drop.
+const WFM_PILOT_ENV_ALPHA: f32 = 0.001;
+/// Audio de-emphasis time constant. 50 µs in ITU Region 1 (Europe), 75 µs
+/// in North America. We target R1 by default — see the open question in
+/// MEMORY.md about exposing this as a user knob.
+const WFM_DEEMPH_TAU_S: f32 = 50e-6;
 
-/// Wideband-FM mono demodulator. Decimates 2.4 MS/s IQ to 240 kS/s,
-/// runs an FM discriminator, then decimates to 48 kS/s audio with a
-/// 15 kHz audio low-pass.
+/// Wideband-FM demodulator with optional stereo MPX decode.
+///
+/// Chain:
+///   1. 2.4 MS/s IQ → 240 kS/s IF via 10:1 windowed-sinc decimation.
+///   2. FM discriminator → real-valued MPX at 240 kS/s.
+///   3a. MPX → audio LPF + 5:1 decimation → 48 kS/s L+R sum.
+///   3b. If stereo detected: pilot biquad-BPF → square → biquad-BPF at 38 kHz
+///       → multiply MPX by this coherent reference → audio LPF + 5:1
+///       decimation → 48 kS/s L-R difference.
+///   4. L = sum + diff, R = sum - diff. 50 µs de-emphasis per channel.
+///   5. Output interleaved L,R `Float32Array` at 48 kS/s.
+///
+/// When the pilot is absent or stereo is disabled, the output is still
+/// interleaved with L = R = mono so the caller doesn't need to switch ring
+/// layouts mid-stream.
 #[wasm_bindgen]
 pub struct WfmDemod {
     iq_decim: ComplexDecimator,
-    audio_decim: RealDecimator,
+    sum_decim: RealDecimator,
+    diff_decim: RealDecimator,
     last_z: Complex<f32>,
-    /// Audio scale: makes a unit-deviation tone read ~±1 at the output.
     audio_scale: f32,
+
+    // Stereo path
+    stereo_enabled: bool,
+    pilot_bpf: Biquad,
+    bpf38: Biquad,
+    pilot_env: f32,
+    deemph_alpha: f32,
+    deemph_l: f32,
+    deemph_r: f32,
+    /// True when the smoothed pilot envelope is above threshold.
+    stereo_locked: bool,
 
     // Scratch buffers (reused to avoid alloc each call).
     iq_in: Vec<Complex<f32>>,
     iq_if: Vec<Complex<f32>>,
-    discrim_out: Vec<f32>,
+    mpx: Vec<f32>,
+    diff_mix: Vec<f32>,
+    sum_audio: Vec<f32>,
+    diff_audio: Vec<f32>,
+    output: Vec<f32>,
 }
 
 #[wasm_bindgen]
@@ -328,26 +416,63 @@ impl WfmDemod {
         // First stage: 31-tap LPF with cutoff at ~100 kHz / 2.4 MHz = 0.042.
         // Pass band covers the full WFM signal (±100 kHz around DC after mixing).
         let iq_taps = lowpass_taps(31, 0.042);
-        // Second stage: 47-tap LPF with cutoff at 15 kHz / 240 kHz = 0.0625.
-        // Pass band covers the broadcast-FM mono audio (50 Hz – 15 kHz).
-        let audio_taps = lowpass_taps(47, 0.0625);
+        // Audio stage: 47-tap LPF with cutoff at 15 kHz / 240 kHz = 0.0625.
+        // Pass band covers the broadcast-FM mono audio (50 Hz – 15 kHz). We
+        // build TWO independent decimators so the sum (L+R) and difference
+        // (L-R) paths can have separate filter history.
+        let audio_taps_sum = lowpass_taps(47, 0.0625);
+        let audio_taps_diff = lowpass_taps(47, 0.0625);
 
         let audio_scale = WFM_IF_RATE / (PI * WFM_DEVIATION);
 
+        // De-emphasis: y[n] = (1-α)·x[n] + α·y[n-1], with α = exp(-1/(τ·fs)).
+        let deemph_alpha = (-1.0 / (WFM_DEEMPH_TAU_S * AUDIO_RATE)).exp();
+
         WfmDemod {
             iq_decim: ComplexDecimator::new(WFM_IF_DECIM, iq_taps),
-            audio_decim: RealDecimator::new(WFM_AUDIO_DECIM, audio_taps),
+            sum_decim: RealDecimator::new(WFM_AUDIO_DECIM, audio_taps_sum),
+            diff_decim: RealDecimator::new(WFM_AUDIO_DECIM, audio_taps_diff),
             last_z: Complex { re: 1.0, im: 0.0 },
             audio_scale,
+
+            stereo_enabled: true,
+            pilot_bpf: Biquad::bandpass(WFM_PILOT_HZ, WFM_IF_RATE, 50.0),
+            bpf38: Biquad::bandpass(WFM_LR_CARRIER_HZ, WFM_IF_RATE, 25.0),
+            pilot_env: 0.0,
+            deemph_alpha,
+            deemph_l: 0.0,
+            deemph_r: 0.0,
+            stereo_locked: false,
+
             iq_in: Vec::with_capacity(65_536),
             iq_if: Vec::with_capacity(65_536 / WFM_IF_DECIM + 16),
-            discrim_out: Vec::with_capacity(65_536 / WFM_IF_DECIM + 16),
+            mpx: Vec::with_capacity(65_536 / WFM_IF_DECIM + 16),
+            diff_mix: Vec::with_capacity(65_536 / WFM_IF_DECIM + 16),
+            sum_audio: Vec::with_capacity(65_536 / (WFM_IF_DECIM * WFM_AUDIO_DECIM) + 16),
+            diff_audio: Vec::with_capacity(65_536 / (WFM_IF_DECIM * WFM_AUDIO_DECIM) + 16),
+            output: Vec::with_capacity(2 * (65_536 / (WFM_IF_DECIM * WFM_AUDIO_DECIM) + 16)),
         }
     }
 
-    /// Process a chunk of 8-bit unsigned IQ at 2.4 MS/s. Returns the audio
-    /// samples produced for this chunk (variable length — `input_samples /
-    /// (WFM_IF_DECIM * WFM_AUDIO_DECIM)`, modulo decimator phase).
+    /// Whether to attempt stereo decode when the 19 kHz pilot is present.
+    /// When disabled, output is L=R=mono regardless of the pilot.
+    pub fn set_stereo_enabled(&mut self, enabled: bool) {
+        self.stereo_enabled = enabled;
+        if !enabled {
+            self.stereo_locked = false;
+        }
+    }
+
+    /// True when the smoothed pilot envelope exceeds the threshold AND
+    /// stereo decoding is enabled. Updated each `process()` call.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn is_stereo_locked(&self) -> bool {
+        self.stereo_locked
+    }
+
+    /// Process a chunk of 8-bit unsigned IQ at 2.4 MS/s. Returns interleaved
+    /// stereo audio (L, R, L, R, …) at 48 kS/s.
     #[must_use]
     pub fn process(&mut self, iq_bytes: &[u8]) -> Vec<f32> {
         // 1) U8 IQ → Complex<f32>, offset-binary normalised.
@@ -364,21 +489,92 @@ impl WfmDemod {
         self.iq_if.clear();
         self.iq_decim.process(&self.iq_in, &mut self.iq_if);
 
-        // 3) FM discriminator: phase difference between consecutive samples.
-        //    arg(z[n] * conj(z[n-1])) = atan2(Im(z·z*'), Re(z·z*'))
-        self.discrim_out.clear();
-        self.discrim_out.reserve(self.iq_if.len());
+        // 3) FM discriminator → MPX. Per-sample we also drive the pilot
+        // biquad and the squared-pilot biquad so the 38 kHz reference
+        // available on the diff path is in lock with the carrier.
+        self.mpx.clear();
+        self.mpx.reserve(self.iq_if.len());
+        self.diff_mix.clear();
+        self.diff_mix.reserve(self.iq_if.len());
+
         for &z in &self.iq_if {
             let prod = z * self.last_z.conj();
             let phase = prod.im.atan2(prod.re);
-            self.discrim_out.push(phase * self.audio_scale);
+            let m = phase * self.audio_scale;
             self.last_z = z;
+
+            // Pilot biquad → squared → 38 kHz BPF gives a coherent local
+            // oscillator at the suppressed-carrier frequency. Phase tracks
+            // automatically since squaring a clean tone gives 2× freq at 2θ.
+            let pilot = self.pilot_bpf.process(m);
+            let ref38 = self.bpf38.process(pilot * pilot);
+
+            // Smoothed pilot envelope for the stereo-lock decision.
+            self.pilot_env =
+                (1.0 - WFM_PILOT_ENV_ALPHA) * self.pilot_env + WFM_PILOT_ENV_ALPHA * pilot.abs();
+
+            self.mpx.push(m);
+            // Coherent demod of L-R: multiply MPX by 38 kHz reference, then
+            // let the audio LPF below reject everything but the baseband.
+            // The squared-pilot reference has amplitude ∝ (pilot envelope)²,
+            // so we dynamically renormalize: target sum / diff gain equality
+            // independent of pilot strength. Derivation: pilot p(t)=A·sin(ωt)
+            // → p²(t) = A²/2·(1-cos(2ωt)); bpf38 → A²/2·cos(2ωt). |p| mean = 2A/π
+            // (smoothed pilot_env). So 1/ref38_amp = 2/A² = 8/(π·pilot_env)².
+            let env2 = self.pilot_env * self.pilot_env;
+            let norm = if env2 > 1e-6 {
+                8.0 / (PI * PI * env2)
+            } else {
+                0.0
+            };
+            self.diff_mix.push(m * ref38 * norm);
         }
 
-        // 4) Decimate audio 5:1 → 48 kS/s and return.
-        let mut audio_out = Vec::with_capacity(self.discrim_out.len() / WFM_AUDIO_DECIM + 1);
-        self.audio_decim.process(&self.discrim_out, &mut audio_out);
-        audio_out
+        // 4) Audio-rate filtering + decimation. Sum path uses raw MPX; diff
+        // path uses the mixed signal. Both share the same audio LPF shape
+        // but keep independent histories.
+        self.sum_audio.clear();
+        self.sum_decim.process(&self.mpx, &mut self.sum_audio);
+
+        self.diff_audio.clear();
+        self.diff_decim
+            .process(&self.diff_mix, &mut self.diff_audio);
+
+        // 5) Decide stereo lock based on the smoothed pilot envelope. The
+        // hysteresis is built in by the slow envelope (~1 ms time constant)
+        // — flip-flopping between mono/stereo is rare in practice.
+        self.stereo_locked = self.stereo_enabled && self.pilot_env > WFM_PILOT_THRESHOLD;
+
+        // 6) Build interleaved stereo output. L = sum + diff, R = sum - diff.
+        // When stereo is not locked (no pilot or user disabled it), output
+        // L = R = mono so the audio ring layout is always the same.
+        let n_audio = self.sum_audio.len().min(self.diff_audio.len());
+        self.output.clear();
+        self.output.reserve(n_audio * 2);
+        if self.stereo_locked {
+            for i in 0..n_audio {
+                let sum = self.sum_audio[i];
+                let diff = self.diff_audio[i];
+                let l = sum + diff;
+                let r = sum - diff;
+                // 50 µs de-emphasis per channel.
+                self.deemph_l = (1.0 - self.deemph_alpha) * l + self.deemph_alpha * self.deemph_l;
+                self.deemph_r = (1.0 - self.deemph_alpha) * r + self.deemph_alpha * self.deemph_r;
+                self.output.push(self.deemph_l);
+                self.output.push(self.deemph_r);
+            }
+        } else {
+            for i in 0..n_audio {
+                let mono = self.sum_audio[i];
+                self.deemph_l =
+                    (1.0 - self.deemph_alpha) * mono + self.deemph_alpha * self.deemph_l;
+                // Drive R from the same de-emphasis state for L=R behavior.
+                self.deemph_r = self.deemph_l;
+                self.output.push(self.deemph_l);
+                self.output.push(self.deemph_r);
+            }
+        }
+        self.output.clone()
     }
 }
 
@@ -847,23 +1043,86 @@ mod tests {
         let mut demod = WfmDemod::new();
         let audio = demod.process(&iq);
 
-        // Expect roughly chunk_samples / (WFM_IF_DECIM * WFM_AUDIO_DECIM)
-        // = 24_000 / 50 ≈ 480 samples (10 ms at 48 kHz).
+        // Output is interleaved stereo (L, R, L, R, ...) at 48 kHz, so the
+        // total length is 2× the mono sample count. ~480 mono samples → ~960.
         assert!(
-            audio.len() >= 400 && audio.len() <= 520,
+            audio.len() >= 800 && audio.len() <= 1040,
             "unexpected audio length: {}",
             audio.len()
         );
 
-        // Output should have meaningful amplitude (not silence). With 50/75 of
-        // full-scale deviation and proper scaling, peak should be on the
-        // order of 0.5–1.0.
+        // No pilot in this synthetic signal → demod must stay in mono mode
+        // (L = R). 50 µs de-emphasis attenuates a 1 kHz tone by ~3 dB so the
+        // expected peak comes in lower than the raw discriminator output —
+        // 0.05 is a safe floor.
+        assert!(!demod.is_stereo_locked(), "false pilot lock");
         let max = audio.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
         assert!(
-            max > 0.1,
+            max > 0.05,
             "demod output looks like silence (max abs = {max})"
         );
         assert!(max < 2.0, "demod output overshoots (max abs = {max})");
+
+        // Mono guarantee: L and R must match sample-for-sample.
+        for ch in audio.chunks_exact(2) {
+            assert!((ch[0] - ch[1]).abs() < 1e-6, "mono path L != R");
+        }
+    }
+
+    /// Stereo MPX synthesis: build a multiplex with 90% sum + pilot + L-R
+    /// suppressed-carrier and feed it through the demod. After the chain
+    /// the L and R channels should be distinguishable (one tone present,
+    /// the other near silent) and the demod should report stereo lock.
+    #[test]
+    fn wfm_demod_locks_to_stereo_pilot() {
+        // Build a real-valued MPX at 240 kS/s directly, then FM-modulate it
+        // up to a complex IQ signal at 2.4 MS/s. This is more controllable
+        // than synthesising a real stereo broadcast.
+        let chunk_samples = 240_000usize; // 100 ms at 2.4 MS/s
+        let mut iq = vec![0u8; chunk_samples * 2];
+        let mut phase = 0.0f32;
+        let amp = 100.0_f32;
+        // MPX content: 1 kHz on L (only). With L=tone, R=0 we have
+        //   sum = (L+R)/2 = 0.5·tone     (audible at base band)
+        //   diff = (L-R)/2 = 0.5·tone    (on 38 kHz suppressed carrier)
+        for n in 0..chunk_samples {
+            let t = n as f32 / WFM_INPUT_RATE;
+            let tone = (2.0 * PI * 1_000.0 * t).sin();
+            let sum_baseband = 0.45 * tone;
+            // CCIR Rec 450: pilot is coherent with the suppressed carrier.
+            // Using cos for both keeps that phase relationship intact, so
+            // the receiver's squared-pilot reference comes out in phase
+            // with the DSB-SC modulating carrier.
+            let diff_dsbsc = 0.45 * tone * (2.0 * PI * 38_000.0 * t).cos();
+            let pilot = 0.10 * (2.0 * PI * 19_000.0 * t).cos();
+            let mpx = sum_baseband + pilot + diff_dsbsc;
+
+            // FM modulate MPX onto a complex carrier with 75 kHz peak deviation.
+            let inst_freq = 75_000.0 * mpx;
+            phase += 2.0 * PI * inst_freq / WFM_INPUT_RATE;
+            iq[2 * n] = f32_to_u8(amp * phase.cos() + 127.5);
+            iq[2 * n + 1] = f32_to_u8(amp * phase.sin() + 127.5);
+        }
+
+        let mut demod = WfmDemod::new();
+        // Warm-up pass for biquad/decimator transients to settle.
+        let _ = demod.process(&iq);
+        let audio = demod.process(&iq);
+
+        assert!(demod.is_stereo_locked(), "pilot not detected");
+
+        // Split interleaved L/R and check L >> R amplitude (we put tone on L only).
+        let mut max_l = 0.0f32;
+        let mut max_r = 0.0f32;
+        for ch in audio.chunks_exact(2) {
+            max_l = max_l.max(ch[0].abs());
+            max_r = max_r.max(ch[1].abs());
+        }
+        assert!(max_l > 0.05, "L channel silent (max = {max_l})");
+        assert!(
+            max_l > 2.0 * max_r,
+            "stereo separation poor: L max = {max_l}, R max = {max_r}",
+        );
     }
 
     /// Synthesize a narrowband-FM signal at baseband (DC-centred) with

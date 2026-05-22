@@ -35,6 +35,20 @@ Long-running notes that should survive across sessions but don't belong in the f
 - NFM/AM/SSB/CW are mode-cycle UI only — actual demod lands in B6b–B6d.
 - Next milestone: **B6b** — NFM + AM demods (much simpler than WFM; single-stage envelope/quadrature demods on the existing channelizer chain).
 
+**As of M2.0 (stereo WFM):**
+- M2.0 shipped: stereo broadcast FM. Closes the deferred half of PRD M1.3.
+- `WfmDemod` now returns interleaved L,R Float32Array at 48 kHz. Two RealDecimators (sum + diff) run in parallel.
+- Pilot detection: 19 kHz biquad BPF with Q=50, squared to get 38 kHz reference, second biquad BPF at 38 kHz with Q=25. Pilot envelope is smoothed (`α=0.001`) and compared against `0.02` threshold for stereo lock.
+- **CCIR Rec 450 phase convention** matters: pilot must be coherent with the suppressed carrier. Spec is in-phase (both `cos`). My initial test used `sin` for pilot and `cos` for carrier — 90° offset → squared reference came out with the wrong sign → L/R swapped (or summed). Always use matching phase in synthesis.
+- **Dynamic gain normalization**: the squared-pilot reference amplitude is ∝ (pilot envelope)². Sum and diff paths must be balanced regardless of pilot strength. Formula: norm = 8 / (π² × pilot_env²). Derivation in lib.rs comment.
+- **50 µs de-emphasis** (ITU R1 / Europe). North America uses 75 µs — open question whether to expose as a user knob.
+- Audio path is now stereo end-to-end:
+  - SAB ring stores interleaved L,R f32 (8 bytes per frame).
+  - AudioWorklet outputs 2 channels (`outputChannelCount: [2]`).
+  - PCM ring capacity doubled to 384 kB (~1 s of stereo audio).
+  - Non-WFM demods produce mono Vec<f32>; the DSP worker duplicates to L=R before writing.
+- Test pattern for stereo demod: synthesize MPX directly (sum + pilot + diff·cos(38k)), FM-modulate to IQ, run through demod, expect L≫R when tone is panned to L. Warm-up pass needed for biquad transients to settle.
+
 **As of B9 (network IQ + Go bridge):**
 - B9 shipped. `bridge/main.go` is a single-binary HTTP/WebSocket proxy on `127.0.0.1:9090` (default). `/ws` upgrades a WebSocket and pipes bytes to/from `rtl_tcp` (configurable target, default `127.0.0.1:1234`). `--cors-origin` defaults to the Pages URL; use `*` for trusted LANs only.
 - Single Go dep: `github.com/coder/websocket` (modern fork of nhooyr/websocket). Stdlib doesn't ship WebSocket.

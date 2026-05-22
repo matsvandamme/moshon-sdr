@@ -1,24 +1,25 @@
 /**
- * Moshon SDR audio worklet — pulls 48 kHz mono PCM samples from a
- * SharedArrayBuffer ring fed by the DSP worker and writes them to the
- * audio output.
+ * Moshon SDR audio worklet — pulls 48 kHz INTERLEAVED STEREO PCM from a
+ * SharedArrayBuffer ring fed by the DSP worker and writes to a 2-channel
+ * output.
  *
- * Lives in /public/ (served verbatim) because AudioWorkletProcessor files
- * load via `audioContext.audioWorklet.addModule(url)` and need a stable
- * URL. No imports here — the audio thread runs an isolated global scope.
+ * The ring stores interleaved L,R,L,R,... f32 samples. One "frame" =
+ * 2 floats = 8 bytes. Non-WFM demods produce L=R (so the audio is still
+ * mono-equivalent) but the layout is consistent so the worklet never has
+ * to switch modes.
  *
  * Ring buffer layout (must match web/src/lib/ring/sab-ring.ts):
  *   bytes 0..3 : writePos (Int32, mod 2 * capacity)
  *   bytes 4..7 : readPos  (Int32, mod 2 * capacity)
  *   bytes 8..n : body of `capacity` bytes
- *
- * Each PCM frame is one 4-byte f32 little-endian.
  */
 
 const HEADER_BYTES = 8;
 const WRITE_POS = 0;
 const READ_POS = 1;
 const F32_BYTES = 4;
+const CHANNELS = 2;
+const FRAME_BYTES = CHANNELS * F32_BYTES; // 8
 
 class PcmRingPlayer extends AudioWorkletProcessor {
   constructor(options) {
@@ -33,8 +34,6 @@ class PcmRingPlayer extends AudioWorkletProcessor {
     this.volume = 1;
     this.muted = false;
 
-    // Telemetry — surface to main so the UI can show whether the audio
-    // pipeline is alive. Posted ~every 100 ms.
     this.samplesPlayed = 0;
     this.samplesUnderrun = 0;
     this.lastStatsPost = currentTime;
@@ -47,51 +46,61 @@ class PcmRingPlayer extends AudioWorkletProcessor {
       }
     };
 
-    // Tell main we're alive. processorOptions arrived intact, ring is wired.
     this.port.postMessage({ kind: 'ready', capacityBytes: this.capacityBytes });
   }
 
   process(_inputs, outputs) {
-    const out = outputs[0]?.[0];
-    if (!out) return true;
-    const wantSamples = out.length;
-    const wantBytes = wantSamples * F32_BYTES;
+    const outL = outputs[0]?.[0];
+    const outR = outputs[0]?.[1] ?? outL;
+    if (!outL) return true;
+    const wantFrames = outL.length;
 
     const w = Atomics.load(this.header, WRITE_POS);
     const r = Atomics.load(this.header, READ_POS);
     const used = (w - r + this.modBytes) % this.modBytes;
-    const availSamples = Math.floor(used / F32_BYTES);
-    const takeSamples = Math.min(wantSamples, availSamples);
+    const availFrames = Math.floor(used / FRAME_BYTES);
+    const takeFrames = Math.min(wantFrames, availFrames);
 
     const gain = this.muted ? 0 : this.volume;
 
-    if (takeSamples > 0) {
+    if (takeFrames > 0) {
+      // rIdxBytes points at the next byte to read. Each frame is 8 bytes
+      // (L, R as f32 LE). We compute the f32 index for indexing bodyF32
+      // directly — this is cheap because the body was created as Float32Array.
       const rIdxBytes = r % this.capacityBytes;
       const rIdxF32 = rIdxBytes / F32_BYTES;
-      const tail = Math.min(takeSamples, (this.capacityBytes - rIdxBytes) / F32_BYTES);
-      // First part (up to end of buffer)
-      for (let i = 0; i < tail; i++) {
-        out[i] = this.bodyF32[rIdxF32 + i] * gain;
+      // How many frames before we wrap the ring.
+      const framesUntilWrap = (this.capacityBytes - rIdxBytes) / FRAME_BYTES;
+      const tailFrames = Math.min(takeFrames, framesUntilWrap);
+      // First part
+      for (let i = 0; i < tailFrames; i++) {
+        outL[i] = this.bodyF32[rIdxF32 + i * CHANNELS] * gain;
+        outR[i] = this.bodyF32[rIdxF32 + i * CHANNELS + 1] * gain;
       }
-      // Wrap-around part
-      for (let i = tail; i < takeSamples; i++) {
-        out[i] = this.bodyF32[i - tail] * gain;
+      // Wrap part
+      for (let i = tailFrames; i < takeFrames; i++) {
+        const j = (i - tailFrames) * CHANNELS;
+        outL[i] = this.bodyF32[j] * gain;
+        outR[i] = this.bodyF32[j + 1] * gain;
       }
       Atomics.store(
         this.header,
         READ_POS,
-        (r + takeSamples * F32_BYTES) % this.modBytes,
+        (r + takeFrames * FRAME_BYTES) % this.modBytes,
       );
     }
 
-    // Underrun — pad rest of buffer with silence.
-    for (let i = takeSamples; i < wantSamples; i++) {
-      out[i] = 0;
+    // Underrun — pad with silence on both channels.
+    for (let i = takeFrames; i < wantFrames; i++) {
+      outL[i] = 0;
+      outR[i] = 0;
     }
 
-    // Telemetry
-    this.samplesPlayed += takeSamples;
-    this.samplesUnderrun += wantSamples - takeSamples;
+    // Telemetry. We report frames (not float samples) so "Played" stays
+    // intuitive — one "sample" = one moment in time, regardless of channel
+    // count.
+    this.samplesPlayed += takeFrames;
+    this.samplesUnderrun += wantFrames - takeFrames;
     if (currentTime - this.lastStatsPost >= 0.1) {
       this.lastStatsPost = currentTime;
       this.port.postMessage({
