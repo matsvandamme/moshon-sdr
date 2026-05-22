@@ -15,6 +15,7 @@
  */
 
 import init, {
+  AdsbDemod,
   AmDemod,
   CwDemod,
   FftContext,
@@ -25,7 +26,7 @@ import init, {
 import { SabRing } from '../lib/ring/sab-ring';
 import { CwDecoder } from '../lib/dsp/cw-decoder';
 
-export type DemodMode = 'wfm' | 'nfm' | 'am' | 'usb' | 'lsb' | 'cw';
+export type DemodMode = 'wfm' | 'nfm' | 'am' | 'usb' | 'lsb' | 'cw' | 'adsb';
 
 type InboundInit = {
   kind: 'init';
@@ -46,6 +47,7 @@ type OutboundReady = { kind: 'ready' };
 type OutboundFft = { kind: 'fft'; bins: Float32Array; time: number };
 type OutboundAudio = { kind: 'audio'; samples: Float32Array; time: number };
 type OutboundCwText = { kind: 'cwText'; text: string; wpm: number };
+type OutboundAdsb = { kind: 'adsbFrames'; framesJson: string };
 type OutboundRds = {
   kind: 'rds';
   synced: boolean;
@@ -60,6 +62,7 @@ type Outbound =
   | OutboundFft
   | OutboundAudio
   | OutboundCwText
+  | OutboundAdsb
   | OutboundRds
   | OutboundError;
 
@@ -95,6 +98,7 @@ let minPostIntervalMs = 33;
 let lastPostMs = 0;
 let recording = false;
 let cwDecoder: CwDecoder | null = null;
+let adsbDemod: AdsbDemod | null = null;
 let wfmDemodRef: WfmDemod | null = null;
 let rdsTickerHandle: ReturnType<typeof setInterval> | null = null;
 let lastRdsPi = -1;
@@ -135,10 +139,21 @@ function buildDemod(mode: DemodMode, bandwidthHz: number): Demod {
       return new SsbDemod(bandwidthHz, true);
     case 'cw':
       return new CwDemod(bandwidthHz);
+    case 'adsb':
+      // ADS-B doesn't use the audio demod path — the loop branches on
+      // mode === 'adsb' below. Return a sentinel that's never called.
+      return ADSB_NULL_DEMOD;
     default:
       return new WfmDemod();
   }
 }
+
+/** Sentinel returned for ADS-B mode. process_loop never calls .process()
+ *  on it; the ADS-B path runs `adsbDemod.process()` instead. */
+const ADSB_NULL_DEMOD: Demod = {
+  process: () => new Float32Array(0),
+  free: () => {},
+};
 
 function rebuildDemod(mode: DemodMode, bandwidthHz: number) {
   demod?.free();
@@ -149,6 +164,14 @@ function rebuildDemod(mode: DemodMode, bandwidthHz: number) {
   // Reset the CW decoder state on mode change so leftover patterns from a
   // previous CW session don't bleed into the next one.
   cwDecoder?.reset();
+  // (Re)create ADS-B decoder only when entering ADS-B mode.
+  if (mode === 'adsb') {
+    adsbDemod?.free();
+    adsbDemod = new AdsbDemod(2_400_000);
+  } else if (adsbDemod) {
+    adsbDemod.free();
+    adsbDemod = null;
+  }
   // Clear cached RDS for the new mode so the UI clears immediately.
   lastRdsPi = -1;
   lastRdsPs = '';
@@ -247,6 +270,39 @@ async function processLoop() {
       running = false;
       postOut({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
       return;
+    }
+
+    // ADS-B branch: feed IQ to AdsbDemod, drain any frames, skip audio.
+    if (currentMode === 'adsb' && adsbDemod) {
+      try {
+        adsbDemod.process(iqBufferForFft);
+      } catch (err) {
+        running = false;
+        postOut({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+      // Also drain the backlog so we don't fall behind at 4.8 MB/s.
+      while (iqRing.available() >= demodScratch.length) {
+        iqRing.read(demodScratch);
+        try {
+          adsbDemod.process(demodScratch);
+        } catch (err) {
+          running = false;
+          postOut({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
+          return;
+        }
+      }
+      // Post the FFT (throttled) and drained frames.
+      const framesJson = adsbDemod.drain_frames_json();
+      if (framesJson !== '[]') {
+        postOut({ kind: 'adsbFrames', framesJson });
+      }
+      const now = performance.now();
+      if (now - lastPostMs >= minPostIntervalMs) {
+        lastPostMs = now;
+        postOut({ kind: 'fft', bins, time: now }, [bins.buffer]);
+      }
+      continue;
     }
 
     // Run demod on the same chunk we just FFT'd.

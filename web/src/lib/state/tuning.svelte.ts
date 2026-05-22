@@ -11,7 +11,7 @@
 // Mode table
 // ────────────────────────────────────────────────────────────────────────
 
-export const MODES = ['wfm', 'nfm', 'am', 'usb', 'lsb', 'cw'] as const;
+export const MODES = ['wfm', 'nfm', 'am', 'usb', 'lsb', 'cw', 'adsb'] as const;
 export type Mode = (typeof MODES)[number];
 
 export type ModeInfo = {
@@ -29,6 +29,7 @@ export const MODE_INFO: Record<Mode, ModeInfo> = {
   usb: { label: 'USB', bandwidths: [2_400, 1_800, 2_700, 3_000], defaultStep: 100 },
   lsb: { label: 'LSB', bandwidths: [2_400, 1_800, 2_700, 3_000], defaultStep: 100 },
   cw: { label: 'CW', bandwidths: [500, 200], defaultStep: 50 },
+  adsb: { label: 'ADS-B', bandwidths: [2_400_000], defaultStep: 1_000_000 },
 };
 
 /** Tuning step sizes the user can cycle through with `[` / `]`. */

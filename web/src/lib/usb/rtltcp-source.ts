@@ -63,11 +63,14 @@ export type RdsEvent = {
   stereo: boolean;
 };
 
+export type AdsbFramesEvent = { framesJson: string };
+
 export type StatsCallback = (evt: StatsEvent) => void;
 export type FftCallback = (evt: FftEvent) => void;
 export type AudioCallback = (evt: AudioEvent) => void;
 export type CwTextCallback = (evt: CwTextEvent) => void;
 export type RdsCallback = (evt: RdsEvent) => void;
+export type AdsbFramesCallback = (evt: AdsbFramesEvent) => void;
 
 // Mirror outbound shapes from network-worker.ts.
 type NetStarted = { kind: 'started'; tunerType: number; tunerGainCount: number };
@@ -89,8 +92,16 @@ type DspRds = {
   rt: string;
   stereo: boolean;
 };
+type DspAdsb = { kind: 'adsbFrames'; framesJson: string };
 type DspErr = { kind: 'error'; message: string };
-type DspOutbound = DspReady | DspFft | DspAudio | DspCwText | DspRds | DspErr;
+type DspOutbound =
+  | DspReady
+  | DspFft
+  | DspAudio
+  | DspCwText
+  | DspRds
+  | DspAdsb
+  | DspErr;
 
 export class RtlTcpSource {
   private netWorker: Worker | null = null;
@@ -104,6 +115,7 @@ export class RtlTcpSource {
   private audioListeners = new Set<AudioCallback>();
   private cwTextListeners = new Set<CwTextCallback>();
   private rdsListeners = new Set<RdsCallback>();
+  private adsbListeners = new Set<AdsbFramesCallback>();
 
   /** Construct the WebSocket URL from a bridge base URL + optional target. */
   static buildWsUrl(bridgeUrl: string, rtlTcpTarget?: string): string {
@@ -229,6 +241,13 @@ export class RtlTcpSource {
     };
   }
 
+  onAdsbFrames(cb: AdsbFramesCallback): () => void {
+    this.adsbListeners.add(cb);
+    return () => {
+      this.adsbListeners.delete(cb);
+    };
+  }
+
   private spawnWorkers(): void {
     if (!this.netWorker) {
       this.netWorker = new Worker(
@@ -304,6 +323,11 @@ export class RtlTcpSource {
             rt: msg.rt,
             stereo: msg.stereo,
           });
+        }
+        break;
+      case 'adsbFrames':
+        for (const cb of this.adsbListeners) {
+          cb({ framesJson: msg.framesJson });
         }
         break;
       case 'error':

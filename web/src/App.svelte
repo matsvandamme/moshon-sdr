@@ -37,8 +37,11 @@
   import MemoryChannels from './lib/ui/MemoryChannels.svelte';
   import Onboarding from './lib/ui/Onboarding.svelte';
   import NetworkConnect from './lib/ui/NetworkConnect.svelte';
+  import AircraftPanel from './lib/ui/AircraftPanel.svelte';
   import { AudioPipeline } from './lib/audio/audio-pipeline';
   import { recorder } from './lib/audio/recorder.svelte';
+  import { aircraftTracker } from './lib/state/aircraft.svelte';
+  import type { AdsbRawFrame } from './lib/dsp/adsb-parser';
   import { readHash, writeHash } from './lib/state/url-hash';
   import { peakDbInChannel, dbToSUnit } from './lib/dsp/smeter';
 
@@ -111,6 +114,7 @@
   let unsubRecAudio: (() => void) | null = null;
   let unsubCwText: (() => void) | null = null;
   let unsubRds: (() => void) | null = null;
+  let unsubAdsb: (() => void) | null = null;
   let cwDecodedText = $state('');
   let cwDecodedWpm = $state(0);
 
@@ -311,6 +315,14 @@
       rdsRt = evt.rt;
       rdsStereo = evt.stereo;
     });
+    unsubAdsb = src.onAdsbFrames((evt) => {
+      try {
+        const frames = JSON.parse(evt.framesJson) as AdsbRawFrame[];
+        for (const f of frames) aircraftTracker.ingest(f);
+      } catch {
+        // Bad JSON from the worker — drop the batch.
+      }
+    });
   }
 
   async function startAudio() {
@@ -337,12 +349,14 @@
     unsubRecAudio?.();
     unsubCwText?.();
     unsubRds?.();
+    unsubAdsb?.();
     unsubStats = null;
     unsubFft = null;
     unsubAudio = null;
     unsubRecAudio = null;
     unsubCwText = null;
     unsubRds = null;
+    unsubAdsb = null;
     // If a recording was in progress, save what we have.
     if (recorder.recording) recorder.stopAndDownload();
   }
@@ -353,6 +367,29 @@
     if (tuning.mode !== 'cw') {
       cwDecodedText = '';
       cwDecodedWpm = 0;
+    }
+  });
+
+  // When entering ADS-B mode, auto-jump to 1090 MHz — that's the only
+  // frequency Mode S squitters live on. Leaving the mode resets nothing
+  // (the user might want the same dial back).
+  $effect(() => {
+    if (tuning.mode === 'adsb' && tuning.centerFreq !== 1_090_000_000) {
+      tuning.centerFreq = 1_090_000_000;
+    }
+    // Clear the aircraft list when leaving ADS-B so the panel starts fresh
+    // on the next entry. Stale entries hang around briefly if we don't.
+    if (tuning.mode !== 'adsb') {
+      aircraftTracker.clear();
+    }
+  });
+
+  // Periodic stale-aircraft evict so the list doesn't grow unbounded.
+  let evictTimer = 0;
+  $effect(() => {
+    if (rtlStatus === 'streaming' && tuning.mode === 'adsb') {
+      evictTimer = window.setInterval(() => aircraftTracker.evictStale(), 5_000);
+      return () => window.clearInterval(evictTimer);
     }
   });
 
@@ -795,6 +832,13 @@
           onTune={onClickToTune}
         />
       </div>
+
+      <!-- ADS-B (M2.6) — aircraft list when tuned to 1090 MHz. -->
+      {#if tuning.mode === 'adsb' && rtlStatus === 'streaming'}
+        <div class="mb-3">
+          <AircraftPanel />
+        </div>
+      {/if}
 
       <!-- RDS (M2.4) — only relevant in WFM mode. Shows up as soon as the
            block sync state machine locks; PS / RT fields fill in over a few

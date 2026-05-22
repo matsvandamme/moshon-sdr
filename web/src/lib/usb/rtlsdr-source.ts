@@ -89,11 +89,17 @@ export type RdsEvent = {
   stereo: boolean;
 };
 
+export type AdsbFramesEvent = {
+  /** JSON-encoded array of {df, icao, t, raw} records. */
+  framesJson: string;
+};
+
 export type StatsCallback = (evt: StatsEvent) => void;
 export type FftCallback = (evt: FftEvent) => void;
 export type AudioCallback = (evt: AudioEvent) => void;
 export type CwTextCallback = (evt: CwTextEvent) => void;
 export type RdsCallback = (evt: RdsEvent) => void;
+export type AdsbFramesCallback = (evt: AdsbFramesEvent) => void;
 
 // USB-worker outbound message shapes (mirror usb-worker.ts).
 type UsbStarted = { kind: 'started'; actualSampleRate: number; actualFrequency: number };
@@ -115,8 +121,16 @@ type DspRds = {
   rt: string;
   stereo: boolean;
 };
+type DspAdsb = { kind: 'adsbFrames'; framesJson: string };
 type DspErr = { kind: 'error'; message: string };
-type DspOutbound = DspReady | DspFft | DspAudio | DspCwText | DspRds | DspErr;
+type DspOutbound =
+  | DspReady
+  | DspFft
+  | DspAudio
+  | DspCwText
+  | DspRds
+  | DspAdsb
+  | DspErr;
 
 export class RtlSdrSource {
   private usbWorker: Worker | null = null;
@@ -132,6 +146,7 @@ export class RtlSdrSource {
   private audioListeners = new Set<AudioCallback>();
   private cwTextListeners = new Set<CwTextCallback>();
   private rdsListeners = new Set<RdsCallback>();
+  private adsbListeners = new Set<AdsbFramesCallback>();
 
   /**
    * Opens a device via the WebUSB picker. Must be called inside a user-gesture
@@ -284,6 +299,13 @@ export class RtlSdrSource {
     };
   }
 
+  onAdsbFrames(cb: AdsbFramesCallback): () => void {
+    this.adsbListeners.add(cb);
+    return () => {
+      this.adsbListeners.delete(cb);
+    };
+  }
+
   private spawnWorkers(): void {
     if (!this.usbWorker) {
       this.usbWorker = new Worker(new URL('../../workers/usb-worker.ts', import.meta.url), {
@@ -360,6 +382,11 @@ export class RtlSdrSource {
             rt: msg.rt,
             stereo: msg.stereo,
           });
+        }
+        break;
+      case 'adsbFrames':
+        for (const cb of this.adsbListeners) {
+          cb({ framesJson: msg.framesJson });
         }
         break;
       case 'error':

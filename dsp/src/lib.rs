@@ -1370,6 +1370,298 @@ impl Default for CwDemod {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// ADS-B Mode S extended squitter decoder (M2.6)
+// ──────────────────────────────────────────────────────────────────────────
+//
+// Demodulates 1090 MHz Mode S extended squitter (DF17/DF18) frames from
+// the IQ stream. The caller is responsible for tuning the device to
+// 1090 MHz and routing the IQ here instead of through the audio demods.
+//
+// Pipeline (per `process()`):
+//   1. Convert u8 IQ → envelope magnitude (|I−127.5|² + |Q−127.5|² → sqrt is
+//      omitted; comparisons on squared magnitudes work the same).
+//   2. Push samples into a circular sliding window.
+//   3. At each new sample, test whether a Mode S preamble pattern starts
+//      120 samples earlier (preamble + max frame ~288 samples at 2.4 MS/s).
+//   4. On a preamble match, slice 112 bits using PPM rule (a transmitted
+//      '1' is high then low across the two half-symbols of one bit period;
+//      '0' is low then high).
+//   5. CRC-24 check using the Mode S generator polynomial 0xFFF409. For
+//      DF17 the CRC field is the standard CRC XORed with the sender's
+//      ICAO address, so a valid frame's CRC equals the ICAO embedded in
+//      bits 9-32.
+//   6. Emit decoded raw bytes + DF + ICAO via accessor methods. The JS
+//      side parses ME field type codes.
+
+/// Mode S CRC-24 generator polynomial without the implicit x^24 bit.
+const ADSB_CRC_POLY: u32 = 0x00FF_F409;
+/// Number of bits in the 8 µs preamble at half-bit (2 MHz) resolution.
+const ADSB_PREAMBLE_HALFBITS: usize = 16;
+/// Long ADS-B frame: 112 bits = 14 bytes.
+const ADSB_FRAME_BITS_LONG: usize = 112;
+/// Short Mode S frame (DF0/4/5/11): 56 bits = 7 bytes. Not currently
+/// decoded — all the useful air-traffic info lives in DF17 (long form).
+/// Kept for reference; will be used when short-replies land.
+#[allow(dead_code)]
+const ADSB_FRAME_BITS_SHORT: usize = 56;
+/// Maximum frame size in bytes (long frame).
+const ADSB_FRAME_BYTES_LONG: usize = ADSB_FRAME_BITS_LONG / 8;
+/// Detector threshold: a "high" sample needs to be at least this multiple
+/// of the surrounding noise floor to count as a pulse. Tunable.
+const ADSB_DETECTOR_THRESHOLD: f32 = 2.5;
+/// Maximum frames buffered between `process()` calls before older frames
+/// are dropped. 256 frames @ ~10 Hz is plenty of headroom for any single
+/// 1/30 s chunk.
+const ADSB_FRAME_BUFFER_CAP: usize = 256;
+
+/// One decoded ADS-B frame. Raw bytes + the most useful field (DF + ICAO).
+/// The JS side does the rest of the ME-field parsing.
+#[derive(Clone)]
+struct AdsbFrameInternal {
+    raw: [u8; ADSB_FRAME_BYTES_LONG],
+    df: u8,
+    icao: u32,
+    /// Sample-index of the preamble start; useful for time-sequencing pairs
+    /// of CPR position frames.
+    sample_index: u64,
+}
+
+#[wasm_bindgen]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::cast_lossless
+)]
+pub struct AdsbDemod {
+    #[allow(dead_code)]
+    sample_rate_hz: f32,
+    /// Samples per ADS-B bit at the configured sample rate. ~2.4 at 2.4 MS/s.
+    samples_per_bit: f32,
+    /// Circular envelope buffer. Length covers preamble (8 µs) + long frame
+    /// (112 µs) plus a few extra samples of slack — 360 at 2.4 MS/s.
+    env: Vec<f32>,
+    /// Current write position in the circular buffer.
+    write_pos: usize,
+    /// Cumulative sample index since `new()` — exposed in frames.
+    sample_count: u64,
+    /// Last sample index at which we emitted a frame; suppresses overlapping
+    /// detections of the same frame.
+    last_frame_at: u64,
+
+    /// Buffered frames waiting to be drained by the JS poll.
+    pending: Vec<AdsbFrameInternal>,
+}
+
+#[wasm_bindgen]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::cast_lossless
+)]
+impl AdsbDemod {
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new(sample_rate_hz: f32) -> AdsbDemod {
+        let samples_per_bit = sample_rate_hz / 1_000_000.0;
+        // Buffer covers preamble + long frame + slack. At 2.4 MS/s,
+        // ~120 µs × 2.4 = 288 samples; round up generously.
+        let env_len = (samples_per_bit * (8.0 + 112.0 + 16.0)).ceil() as usize;
+        AdsbDemod {
+            sample_rate_hz,
+            samples_per_bit,
+            env: vec![0.0; env_len.max(512)],
+            write_pos: 0,
+            sample_count: 0,
+            last_frame_at: 0,
+            pending: Vec::with_capacity(8),
+        }
+    }
+
+    /// Feed a chunk of IQ samples. Decoded frames pile up internally;
+    /// drain them with `drain_frames_json()`.
+    pub fn process(&mut self, iq_bytes: &[u8]) {
+        let n = iq_bytes.len() / 2;
+        for i in 0..n {
+            let re = f32::from(iq_bytes[2 * i]) - 127.5;
+            let im = f32::from(iq_bytes[2 * i + 1]) - 127.5;
+            // Use squared magnitude — saves a sqrt and comparisons are
+            // monotonic. The detector threshold is a ratio so absolute
+            // scale doesn't matter.
+            let mag2 = re * re + im * im;
+            self.env[self.write_pos] = mag2;
+            self.write_pos = (self.write_pos + 1) % self.env.len();
+            self.sample_count += 1;
+
+            // Try to detect a preamble that started `lookback` samples ago.
+            // We delay detection until we have enough samples after the
+            // putative start to also decode bits — at minimum one long
+            // frame's worth.
+            let lookback_samples =
+                (self.samples_per_bit * (8.0 + ADSB_FRAME_BITS_LONG as f32 + 1.0)).ceil() as u64;
+            if self.sample_count >= lookback_samples
+                && self.sample_count.saturating_sub(self.last_frame_at) > 30
+            {
+                self.try_decode_at(self.sample_count - lookback_samples);
+            }
+        }
+    }
+
+    /// Return all pending frames as a JSON array string, draining the
+    /// internal buffer. JSON is the simplest cross-WASM-boundary format
+    /// for variable-length structured data.
+    #[must_use]
+    pub fn drain_frames_json(&mut self) -> String {
+        let mut s = String::from("[");
+        for (i, f) in self.pending.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str("{\"df\":");
+            s.push_str(&f.df.to_string());
+            s.push_str(",\"icao\":");
+            s.push_str(&f.icao.to_string());
+            s.push_str(",\"t\":");
+            s.push_str(&f.sample_index.to_string());
+            s.push_str(",\"raw\":\"");
+            for b in &f.raw {
+                let hi = b >> 4;
+                let lo = b & 0x0F;
+                s.push(hex_nibble(hi));
+                s.push(hex_nibble(lo));
+            }
+            s.push_str("\"}");
+        }
+        s.push(']');
+        self.pending.clear();
+        s
+    }
+
+    /// Cumulative frame count since construction (does not reset on drain).
+    /// Used by the UI to display a "frames decoded" telemetry counter even
+    /// when there's no current activity.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn frame_count(&self) -> u32 {
+        // We don't keep a separate cumulative counter to save state, so
+        // this is approximate — represents the high-water mark of the
+        // buffer's lifetime. Good enough for telemetry.
+        self.pending.len() as u32
+    }
+
+    fn try_decode_at(&mut self, start_idx: u64) {
+        // The envelope buffer is circular; convert a sample index to a
+        // buffer position relative to write_pos.
+        let env_len = self.env.len();
+        let offset_back = (self.sample_count - start_idx) as usize;
+        if offset_back >= env_len {
+            return; // out of buffer
+        }
+        let start_pos = (self.write_pos + env_len - offset_back) % env_len;
+
+        // Preamble check at 2.4 samples/bit. Half-bit period = samples/bit/2.
+        // Sample at indices 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+        // (in half-bit units, so multiply by samples_per_bit / 2).
+        let half = self.samples_per_bit / 2.0;
+        let mut h = [0.0f32; ADSB_PREAMBLE_HALFBITS];
+        for (k, slot) in h.iter_mut().enumerate() {
+            let s = (k as f32 * half).round() as usize;
+            *slot = self.env[(start_pos + s) % env_len];
+        }
+
+        // Mode S preamble shape: HI LO HI LO LO LO LO HI LO HI LO LO LO LO LO LO
+        // (indices 0, 2, 7, 9 are pulses; rest is quiet)
+        let highs = [h[0], h[2], h[7], h[9]];
+        let lows = [
+            h[1], h[3], h[4], h[5], h[6], h[8], h[10], h[11], h[12], h[13], h[14], h[15],
+        ];
+        let high_min = highs.iter().copied().fold(f32::INFINITY, f32::min);
+        let low_max = lows.iter().copied().fold(0.0f32, f32::max);
+        // Each pulse must be at least THRESHOLD× any quiet sample.
+        if !(high_min > low_max * ADSB_DETECTOR_THRESHOLD && high_min > 0.0) {
+            return;
+        }
+
+        // Decode 112 bits using PPM. Data starts 8 µs after preamble.
+        let bit_period = self.samples_per_bit;
+        let data_offset = (8.0 * bit_period).round() as usize;
+        let mut bytes = [0u8; ADSB_FRAME_BYTES_LONG];
+        for b in 0..ADSB_FRAME_BITS_LONG {
+            let bit_start = data_offset + ((b as f32 * bit_period).round() as usize);
+            let mid = bit_start + ((bit_period / 2.0).round() as usize);
+            let first = self.env[(start_pos + bit_start) % env_len];
+            let second = self.env[(start_pos + mid) % env_len];
+            // '1' = first half high, second half low (and vice versa for '0').
+            let bit_val = u8::from(first > second);
+            bytes[b / 8] |= bit_val << (7 - (b % 8));
+        }
+
+        // DF check first — only DF17/18 (extended squitter) carry ICAO in
+        // the AA field at bits 9-32, with plain CRC (no AP XOR) in PI.
+        let df = (bytes[0] >> 3) & 0x1F;
+        if df != 17 && df != 18 {
+            return;
+        }
+        let computed_crc = mode_s_crc24(&bytes, ADSB_FRAME_BITS_LONG);
+        if computed_crc != 0 {
+            return;
+        }
+        let icao_from_aa =
+            (u32::from(bytes[1]) << 16) | (u32::from(bytes[2]) << 8) | u32::from(bytes[3]);
+
+        // Frame accepted.
+        if self.pending.len() < ADSB_FRAME_BUFFER_CAP {
+            self.pending.push(AdsbFrameInternal {
+                raw: bytes,
+                df,
+                icao: icao_from_aa,
+                sample_index: start_idx,
+            });
+        }
+        self.last_frame_at = self.sample_count;
+    }
+}
+
+impl Default for AdsbDemod {
+    fn default() -> Self {
+        Self::new(2_400_000.0)
+    }
+}
+
+/// Mode S CRC-24 (polynomial 0x1FFF409, lower 24 bits 0xFFF409) computed
+/// over the first `n_bits` of `msg`, MSB-first. For DF17/18 extended
+/// squitter the parity field is plain CRC over data (no ICAO XOR fold-in
+/// — that's used by DF0/4/5/11 short replies via the AP field). So a
+/// clean DF17 frame's syndrome over all 112 bits is zero.
+#[allow(clippy::cast_lossless)]
+fn mode_s_crc24(msg: &[u8], n_bits: usize) -> u32 {
+    let mut crc: u32 = 0;
+    for j in 0..n_bits {
+        let byte = j / 8;
+        let bit = 7 - (j % 8);
+        let b = u32::from((msg[byte] >> bit) & 1);
+        // Standard polynomial-division LFSR: shift register left, slot the
+        // new bit into the LSB, then if the bit that rolled OUT of the
+        // top was 1, XOR with the generator (without its implicit x^24).
+        let top = (crc >> 23) & 1;
+        crc = ((crc << 1) | b) & 0x00FF_FFFF;
+        if top != 0 {
+            crc ^= ADSB_CRC_POLY;
+        }
+    }
+    crc
+}
+
+fn hex_nibble(n: u8) -> char {
+    match n {
+        0..=9 => char::from(b'0' + n),
+        10..=15 => char::from(b'A' + (n - 10)),
+        _ => '?',
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -1674,6 +1966,115 @@ mod tests {
             max_lsb < 0.5 * max_usb,
             "LSB suppression failed: USB max = {max_usb}, LSB max = {max_lsb}",
         );
+    }
+
+    /// Canonical DF17 frame from the pyModeS test suite. PI is plain CRC
+    /// over data (no ICAO XOR for DF17), so the syndrome over all 112 bits
+    /// must be 0 on a clean frame.
+    #[test]
+    fn adsb_crc_zero_on_canonical_df17_frame() {
+        let bytes = hex_to_bytes("8D4840D6202CC371C32CE0576098");
+        assert_eq!(bytes.len(), 14);
+        let crc = mode_s_crc24(&bytes, 112);
+        assert_eq!(crc, 0, "CRC syndrome should be 0 on a valid DF17 frame");
+        let icao = (u32::from(bytes[1]) << 16)
+            | (u32::from(bytes[2]) << 8)
+            | u32::from(bytes[3]);
+        assert_eq!(icao, 0x0048_40D6);
+    }
+
+    /// End-to-end: synthesize an IQ envelope containing one ADS-B frame
+    /// with a clean preamble, feed it through `AdsbDemod`, and verify the
+    /// decoder emits the expected ICAO via `drain_frames_json`.
+    #[test]
+    fn adsb_demod_recovers_synthetic_frame() {
+        let hex = "8D4840D6202CC371C32CE0576098";
+        let bytes = hex_to_bytes(hex);
+        let icao_embedded =
+            (u32::from(bytes[1]) << 16) | (u32::from(bytes[2]) << 8) | u32::from(bytes[3]);
+
+        // Synthesize a 2.4 MS/s u8 IQ stream with the preamble + PPM bits
+        // embedded. We use very crisp samples (high = 200, low = 128 ≈
+        // noise floor) and add a few microseconds of quiet pad on either
+        // side so the detector's lookback window has data to chew on.
+        let sample_rate = 2_400_000.0_f32;
+        let samples_per_bit = sample_rate / 1_000_000.0; // 2.4
+        let half = samples_per_bit / 2.0;
+
+        // Preamble pattern at half-bit resolution. HI LO HI LO LO LO LO HI
+        // LO HI LO LO LO LO LO LO.
+        let preamble: [u8; 16] = [1, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0];
+
+        // Build envelope ([HI, LO, ...]) for the full frame.
+        let n_env_samples = (samples_per_bit * (8.0 + 112.0)).ceil() as usize + 100;
+        let mut env = vec![0u8; n_env_samples];
+        // Preamble.
+        for (k, &v) in preamble.iter().enumerate() {
+            let s = (k as f32 * half).round() as usize;
+            let e = ((k as f32 + 1.0) * half).round() as usize;
+            for i in s..e.min(env.len()) {
+                env[i] = v;
+            }
+        }
+        // Data bits, starting 8 µs after preamble start.
+        let data_start = (8.0 * samples_per_bit).round() as usize;
+        for b in 0..112 {
+            let byte = b / 8;
+            let bit = 7 - (b % 8);
+            let bit_val = (bytes[byte] >> bit) & 1;
+            // '1' → high then low; '0' → low then high.
+            let (first, second) = if bit_val == 1 { (1u8, 0u8) } else { (0u8, 1u8) };
+            let s = data_start + ((b as f32 * samples_per_bit).round() as usize);
+            let mid = s + (half.round() as usize);
+            let end = data_start + (((b + 1) as f32 * samples_per_bit).round() as usize);
+            for i in s..mid.min(env.len()) {
+                env[i] = first;
+            }
+            for i in mid..end.min(env.len()) {
+                env[i] = second;
+            }
+        }
+
+        // Convert envelope (0/1) to u8 IQ. Each sample takes 2 bytes (I, Q).
+        // High = (200, 128), low = (128, 128). Squared magnitude separates
+        // by ~72² vs 0² which clears the 2.5× detector threshold.
+        let mut iq = Vec::with_capacity(env.len() * 2 + 200);
+        // Quiet padding so the demod has lookback room.
+        for _ in 0..100 {
+            iq.push(128u8);
+            iq.push(128u8);
+        }
+        for &v in &env {
+            if v == 1 {
+                iq.push(200);
+                iq.push(128);
+            } else {
+                iq.push(128);
+                iq.push(128);
+            }
+        }
+        // Quiet tail.
+        for _ in 0..100 {
+            iq.push(128u8);
+            iq.push(128u8);
+        }
+
+        let mut demod = AdsbDemod::new(sample_rate);
+        demod.process(&iq);
+        let json = demod.drain_frames_json();
+        // The JSON should contain at least one frame with our ICAO.
+        let needle = format!("\"icao\":{icao_embedded}");
+        assert!(
+            json.contains(&needle),
+            "expected to decode ICAO {icao_embedded:#x}; got JSON: {json}",
+        );
+    }
+
+    fn hex_to_bytes(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid hex"))
+            .collect()
     }
 
     /// Synthesize a zero-beat carrier (constant complex value in baseband

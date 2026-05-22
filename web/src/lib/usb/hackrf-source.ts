@@ -48,11 +48,14 @@ export type RdsEvent = {
   stereo: boolean;
 };
 
+export type AdsbFramesEvent = { framesJson: string };
+
 export type StatsCallback = (evt: StatsEvent) => void;
 export type FftCallback = (evt: FftEvent) => void;
 export type AudioCallback = (evt: AudioEvent) => void;
 export type CwTextCallback = (evt: CwTextEvent) => void;
 export type RdsCallback = (evt: RdsEvent) => void;
+export type AdsbFramesCallback = (evt: AdsbFramesEvent) => void;
 
 // Mirror messages from hackrf-worker.ts.
 type HrfStarted = { kind: 'started'; actualSampleRate: number; actualFrequency: number };
@@ -74,8 +77,16 @@ type DspRds = {
   rt: string;
   stereo: boolean;
 };
+type DspAdsb = { kind: 'adsbFrames'; framesJson: string };
 type DspErr = { kind: 'error'; message: string };
-type DspOutbound = DspReady | DspFft | DspAudio | DspCwText | DspRds | DspErr;
+type DspOutbound =
+  | DspReady
+  | DspFft
+  | DspAudio
+  | DspCwText
+  | DspRds
+  | DspAdsb
+  | DspErr;
 
 export class HackRfSource {
   private hrfWorker: Worker | null = null;
@@ -91,6 +102,7 @@ export class HackRfSource {
   private audioListeners = new Set<AudioCallback>();
   private cwTextListeners = new Set<CwTextCallback>();
   private rdsListeners = new Set<RdsCallback>();
+  private adsbListeners = new Set<AdsbFramesCallback>();
 
   async connect(): Promise<void> {
     if (this.device) return;
@@ -225,6 +237,13 @@ export class HackRfSource {
     };
   }
 
+  onAdsbFrames(cb: AdsbFramesCallback): () => void {
+    this.adsbListeners.add(cb);
+    return () => {
+      this.adsbListeners.delete(cb);
+    };
+  }
+
   private spawnWorkers(): void {
     if (!this.hrfWorker) {
       this.hrfWorker = new Worker(new URL('../../workers/hackrf-worker.ts', import.meta.url), {
@@ -294,6 +313,11 @@ export class HackRfSource {
       case 'rds':
         for (const cb of this.rdsListeners) {
           cb({ synced: msg.synced, pi: msg.pi, ps: msg.ps, rt: msg.rt, stereo: msg.stereo });
+        }
+        break;
+      case 'adsbFrames':
+        for (const cb of this.adsbListeners) {
+          cb({ framesJson: msg.framesJson });
         }
         break;
       case 'error':
