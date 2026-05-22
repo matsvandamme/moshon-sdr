@@ -149,10 +149,14 @@ async function processLoop() {
       audioRing.write(bytes);
     }
 
-    // Drain extra IQ to keep the FFT/demod up with the producer. We
-    // additionally process any backlog past one FFT chunk so the demod
-    // doesn't fall behind.
-    while (iqRing.available() >= demodScratch.length) {
+    // Drain AT MOST one backlog chunk per iteration. Draining the entire
+    // backlog inline (old behaviour) made each iteration take ~30 ms when
+    // multiple chunks were queued, which pushed the FFT post rate down to
+    // ~18 Hz and produced audio underruns at the worker's CPU ceiling.
+    // Consumer rate with one chunk drained per ~12 ms iteration is still
+    // ~6.8 MS/s — comfortably faster than the 2.4 MS/s producer — so any
+    // startup backlog clears within a second or so.
+    if (iqRing.available() >= demodScratch.length) {
       iqRing.read(demodScratch);
       try {
         const audioMore = demod.process(demodScratch);

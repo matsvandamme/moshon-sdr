@@ -30,7 +30,7 @@ RDS, audio/IQ recording, CW decoder, mobile audit.
 | **S2** | SSB on 20 m intelligible + tunable with <10 Hz precision | 🧪 **needs hardware test** | Weaver SSB demod has unit tests proving sideband suppression. Sub-10 Hz tuning is supported via the `[`/`]` step-size cycle (step sizes include 1 Hz, 10 Hz, 100 Hz, …). On-air A/B vs SDR++ pending. |
 | **S3** | Network-IQ end-to-end Pi → phone on a different network | 🧪 **needs hardware test** | Bridge + browser source are wired and the GoReleaser matrix covers `linux/arm` + `linux/arm64` for Pi binaries. End-to-end test pending. |
 | **S4** | URL-share round-trip lands recipient on same signal within 1 second | ✅ **verified** | Hash is `history.replaceState`'d on every tuning change; restored synchronously in `onMount` before WASM init. Round-trip latency is bounded by page load (TTFB + ~25 KB JS), well under 1 s. |
-| **S5** | 30 fps waterfall at 2.4 MS/s with 2048-bin FFT on the author's daily-driver laptop | ✅ **verified** | FFT post rate is throttled to 30 Hz in the DSP worker; visualizer copies via `copyWithin` and runs at rAF cadence. Author confirmed `~30 fps` on hardware during B4b/B6 sessions. |
+| **S5** | 30 fps waterfall at 2.4 MS/s with 2048-bin FFT on the author's daily-driver laptop | 🧪 **needs re-test** | Initial measurement showed 18.7 fps with audio underrun, traced to the DSP worker draining the entire IQ backlog inline (made each loop iteration ~30 ms, dropping post rate to half). Fix in commit changing the backlog drain from `while` to `if` ships in v0.1.0. Re-measure after re-deploy. |
 
 ## Manual verification checklist (pre-release)
 
