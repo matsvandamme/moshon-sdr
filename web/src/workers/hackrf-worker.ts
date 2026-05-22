@@ -25,6 +25,7 @@ import {
   distributeGain,
   packSampleRatePayload,
   packSetFreqPayload,
+  vendorIn1Byte,
   vendorOutNoData,
   vendorOutWithData,
 } from '../lib/usb/hackrf-protocol';
@@ -121,6 +122,10 @@ async function init(opts: InboundInit) {
     }
     await device.claimInterface(HACKRF_INTERFACE);
 
+    // Defensive reset: a previously-bad session might have left the device
+    // in TX or SWEEP mode. SET_TRANSCEIVER_MODE = OFF is always safe.
+    await vendorOutNoData(device, HRF_REQ.SET_TRANSCEIVER_MODE, HRF_MODE.OFF, 0);
+
     // Configure the device. Order matches the libhackrf hackrf_start_rx
     // sequence: rate first, then frequency, then gain, then mode = RX.
     await vendorOutWithData(
@@ -184,12 +189,14 @@ async function applyFrequency(freqHz: number): Promise<void> {
 async function applyGain(gain: number | null): Promise<void> {
   if (!device) return;
   const stages = gain === null ? DEFAULT_GAIN_AGC : distributeGain(gain);
-  // AMP: control-value 0 or 1 in the wValue field (index unused).
+  // AMP: OUT, no data; wValue = 0 or 1.
   await vendorOutNoData(device, HRF_REQ.AMP_ENABLE, stages.ampOn ? 1 : 0, 0);
-  // LNA: gain dB in wIndex per libhackrf (some firmware uses wValue — we
-  // send to both fields for compatibility, the unused one is ignored).
-  await vendorOutNoData(device, HRF_REQ.SET_LNA_GAIN, 0, clampLnaDb(stages.lnaDb));
-  await vendorOutNoData(device, HRF_REQ.SET_VGA_GAIN, 0, clampVgaDb(stages.vgaDb));
+  // LNA + VGA: actually IN transfers per libhackrf — the device returns a
+  // 1-byte ack indicating whether the value was accepted. Sending these as
+  // OUT triggers a STALL ("transfer error has occurred") on Chromium WebUSB.
+  // gain dB goes in wIndex; wValue is reserved (zero).
+  await vendorIn1Byte(device, HRF_REQ.SET_LNA_GAIN, 0, clampLnaDb(stages.lnaDb));
+  await vendorIn1Byte(device, HRF_REQ.SET_VGA_GAIN, 0, clampVgaDb(stages.vgaDb));
 }
 
 async function readLoop() {

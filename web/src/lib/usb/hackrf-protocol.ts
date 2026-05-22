@@ -132,6 +132,34 @@ export async function vendorOutWithData(
   }
 }
 
+/**
+ * Several "set" requests on the HackRF (gain stages, antenna power) are
+ * actually defined as IN transfers in firmware — the device returns a
+ * 1-byte status indicating whether it accepted the value. Using
+ * controlTransferOut for these triggers a STALL with "transfer error".
+ */
+export async function vendorIn1Byte(
+  device: USBDevice,
+  request: number,
+  value: number,
+  index: number,
+): Promise<number> {
+  const r = await device.controlTransferIn(
+    {
+      requestType: 'vendor',
+      recipient: 'device',
+      request,
+      value,
+      index,
+    },
+    1,
+  );
+  if (r.status !== 'ok' || !r.data || r.data.byteLength < 1) {
+    throw new Error(`HackRF control_in request ${request} failed: ${r.status}`);
+  }
+  return r.data.getUint8(0);
+}
+
 // ─── High-level helpers ──────────────────────────────────────────────────
 
 /** Clamp LNA gain to the device's 0..40 dB grid (8 dB steps). */
