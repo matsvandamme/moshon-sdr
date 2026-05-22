@@ -137,6 +137,19 @@ export class RtlSdrSource {
     return startPromise;
   }
 
+  /**
+   * Retune the device without restarting the stream. Pass any subset of the
+   * mutable parameters. Safe to call rapidly (e.g. from a drag handler) —
+   * the worker queues them in postMessage order.
+   */
+  retune(opts: { centerFreq?: number; gain?: number | null }): void {
+    if (!this.usbWorker) return;
+    this.usbWorker.postMessage({
+      kind: 'retune',
+      ...opts,
+    });
+  }
+
   /** Stops streaming. Device remains permitted but the workers shut down. */
   async stop(): Promise<void> {
     if (!this.usbWorker) return;

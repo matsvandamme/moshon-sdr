@@ -8,15 +8,22 @@
     Play,
     Square,
     Unplug,
+    Keyboard,
   } from 'lucide-svelte';
   import { onMount, onDestroy } from 'svelte';
   import init, { smoke } from './lib/dsp/wasm/moshon_dsp.js';
   import { RtlSdrSource, type RtlSdrStatus } from './lib/usb/rtlsdr-source';
+  import type { ColormapName } from './lib/visualizer/spectrum-waterfall';
   import {
-    SpectrumRenderer,
-    WaterfallRenderer,
-    type ColormapName,
-  } from './lib/visualizer/spectrum-waterfall';
+    tuning,
+    formatHz,
+    MODE_INFO,
+    GAIN_STEPS,
+  } from './lib/state/tuning.svelte';
+  import HotkeyHelp from './lib/ui/HotkeyHelp.svelte';
+  import FrequencyEntry from './lib/ui/FrequencyEntry.svelte';
+  import VfoDial from './lib/ui/VfoDial.svelte';
+  import SpectrumWaterfall from './lib/ui/SpectrumWaterfall.svelte';
 
   // ---- WASM smoke (B1) ----
   type WasmStatus = 'pending' | 'ready' | 'error';
@@ -24,16 +31,10 @@
   let wasmError = $state<string | null>(null);
   let smokeResult = $state<number | null>(null);
 
-  // ---- RTL-SDR (B3 + B4) ----
+  // ---- RTL-SDR fixed config ----
   const SAMPLE_RATE = 2_400_000;
-  const CENTER_FREQ = 100_000_000; // 100 MHz — FM broadcast band
   const FFT_SIZE = 2048;
   const FFT_RATE_HZ = 30;
-
-  const SPECTRUM_W = 1024;
-  const SPECTRUM_H = 200;
-  const WATERFALL_W = 1024;
-  const WATERFALL_H = 400;
 
   const source = new RtlSdrSource();
 
@@ -45,23 +46,17 @@
   let elapsedMs = $state(0);
   let fftFramesRendered = $state(0);
 
-  // Default range tuned for typical RTL-SDR noise floor (~-75 dBFS) to strong
-  // local broadcast peaks (~-20 dBFS). With this span the noise floor maps to
-  // about t=0.08 on the colormap LUT — visible (dark grey/purple) rather than
-  // bottoming out at pure black, which is what magma/classic show at t=0.
   let dbMin = $state(-80);
   let dbMax = $state(-20);
   let colormap = $state<ColormapName>('viridis');
 
-  let spectrumCanvas: HTMLCanvasElement | undefined = $state();
-  let waterfallCanvas: HTMLCanvasElement | undefined = $state();
-  let spectrumRenderer: SpectrumRenderer | null = null;
-  let waterfallRenderer: WaterfallRenderer | null = null;
-
-  let latestBins: Float32Array | null = null;
+  let latestBins = $state<Float32Array | null>(null);
   let rafHandle = 0;
   let unsubStats: (() => void) | null = null;
   let unsubFft: (() => void) | null = null;
+
+  let helpOpen = $state(false);
+  let freqEntryOpen = $state(false);
 
   // ---- Lifecycle ----
 
@@ -76,26 +71,6 @@
     }
   });
 
-  // Wire renderers once the canvases land in the DOM, and re-wire if dbMin/
-  // dbMax/colormap change.
-  $effect(() => {
-    if (spectrumCanvas && !spectrumRenderer) {
-      spectrumRenderer = new SpectrumRenderer(spectrumCanvas, { dbMin, dbMax });
-    }
-    if (waterfallCanvas && !waterfallRenderer) {
-      waterfallRenderer = new WaterfallRenderer(waterfallCanvas, { dbMin, dbMax, colormap });
-    }
-  });
-
-  $effect(() => {
-    spectrumRenderer?.setRange(dbMin, dbMax);
-    waterfallRenderer?.setRange(dbMin, dbMax);
-  });
-
-  $effect(() => {
-    waterfallRenderer?.setColormap(colormap);
-  });
-
   onDestroy(() => {
     cancelAnimationFrame(rafHandle);
     unsubStats?.();
@@ -103,27 +78,24 @@
     void source.disconnect();
   });
 
-  // ---- Render loop ----
+  // ---- Retune effects ----
+  // When centerFreq or gain change while streaming, push them to the USB
+  // worker without restarting the stream. The initial values are set by
+  // start() so this only fires on subsequent changes.
+  $effect(() => {
+    const f = tuning.centerFreq;
+    if (rtlStatus === 'streaming') source.retune({ centerFreq: f });
+  });
+  $effect(() => {
+    const g = tuning.gain;
+    if (rtlStatus === 'streaming') source.retune({ gain: g });
+  });
+
+  // ---- Render loop (now just for elapsed timer) ----
 
   function tick() {
     if (streamStartMs !== null) {
       elapsedMs = performance.now() - streamStartMs;
-    }
-    if (latestBins) {
-      // Re-apply controls every frame. Cheap, and guarantees slider/dropdown
-      // changes take effect even if the $effect chain doesn't re-fire (e.g.
-      // because renderer instance refs aren't $state-tracked).
-      if (spectrumRenderer) {
-        spectrumRenderer.setRange(dbMin, dbMax);
-        spectrumRenderer.draw(latestBins);
-      }
-      if (waterfallRenderer) {
-        waterfallRenderer.setRange(dbMin, dbMax);
-        waterfallRenderer.setColormap(colormap);
-        waterfallRenderer.push(latestBins);
-      }
-      latestBins = null;
-      fftFramesRendered++;
     }
     rafHandle = requestAnimationFrame(tick);
   }
@@ -157,9 +129,8 @@
       bytesDropped = s.bytesDropped;
     });
     unsubFft = source.onFft((evt) => {
-      // Keep only the latest frame; the rAF tick drains it. If FFTs arrive
-      // faster than rAF, intermediate frames are dropped (intentional).
       latestBins = evt.bins;
+      fftFramesRendered++;
     });
 
     rafHandle = requestAnimationFrame(tick);
@@ -168,8 +139,8 @@
       rtlStatus = 'streaming';
       await source.start({
         sampleRate: SAMPLE_RATE,
-        centerFreq: CENTER_FREQ,
-        gain: null,
+        centerFreq: tuning.centerFreq,
+        gain: tuning.gain,
         fftSize: FFT_SIZE,
         fftRateHz: FFT_RATE_HZ,
       });
@@ -223,6 +194,76 @@
     }
   }
 
+  function onClickToTune(hz: number) {
+    tuning.centerFreq = hz;
+  }
+
+  // ---- Keyboard hotkeys ----
+  function onWindowKey(e: KeyboardEvent) {
+    // Don't hijack typing in inputs / textareas / contenteditable.
+    const target = e.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable)
+    ) {
+      return;
+    }
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+
+    switch (e.key) {
+      case 'f':
+      case 'F':
+        e.preventDefault();
+        freqEntryOpen = true;
+        break;
+      case 'm':
+      case 'M':
+        e.preventDefault();
+        tuning.cycleMode();
+        break;
+      case 'b':
+      case 'B':
+        e.preventDefault();
+        tuning.cycleBandwidth();
+        break;
+      case 'g':
+      case 'G':
+        e.preventDefault();
+        tuning.cycleGain();
+        break;
+      case ',':
+      case '<':
+        e.preventDefault();
+        tuning.stepDown();
+        break;
+      case '.':
+      case '>':
+        e.preventDefault();
+        tuning.stepUp();
+        break;
+      case '[':
+      case '{':
+        e.preventDefault();
+        tuning.cycleStepSize(-1);
+        break;
+      case ']':
+      case '}':
+        e.preventDefault();
+        tuning.cycleStepSize(1);
+        break;
+      case ' ':
+        e.preventDefault();
+        tuning.toggleMute();
+        break;
+      case '?':
+        e.preventDefault();
+        helpOpen = true;
+        break;
+    }
+  }
+
   // ---- Derived display values ----
 
   const BYTES_PER_SAMPLE = 2;
@@ -234,18 +275,25 @@
     elapsedMs > 0 ? fftFramesRendered / (elapsedMs / 1000) : 0,
   );
 
-  function formatHz(hz: number): string {
-    if (hz >= 1e9) return `${(hz / 1e9).toFixed(3)} GHz`;
-    if (hz >= 1e6) return `${(hz / 1e6).toFixed(3)} MHz`;
-    if (hz >= 1e3) return `${(hz / 1e3).toFixed(1)} kHz`;
-    return `${hz} Hz`;
-  }
   function formatMSamples(n: number): string {
     if (n >= 1e6) return `${(n / 1e6).toFixed(2)} MS`;
     if (n >= 1e3) return `${(n / 1e3).toFixed(1)} kS`;
     return `${n} S`;
   }
+
+  function gainLabel(g: number | null): string {
+    return g === null ? 'AGC' : `${g} dB`;
+  }
 </script>
+
+<svelte:window onkeydown={onWindowKey} />
+
+<HotkeyHelp bind:open={helpOpen} />
+<FrequencyEntry
+  bind:open={freqEntryOpen}
+  initialValue={(tuning.centerFreq / 1e6).toString()}
+  onSubmit={(hz) => (tuning.centerFreq = hz)}
+/>
 
 <main class="min-h-full flex flex-col items-center px-4 py-8 gap-6">
   <header class="text-center">
@@ -279,9 +327,20 @@
   >
     <header class="flex items-center justify-between mb-4">
       <h2 class="text-sm font-medium text-neutral-300 uppercase tracking-wide">
-        RTL-SDR (WebUSB) · Spectrum &amp; Waterfall
+        RTL-SDR · Spectrum &amp; Waterfall
       </h2>
-      <span class="font-mono text-xs text-neutral-500">B3 · B4 · M1.1–1.4</span>
+      <div class="flex items-center gap-2">
+        <button
+          type="button"
+          onclick={() => (helpOpen = true)}
+          class="inline-flex items-center gap-1 rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 px-2 py-1 text-xs font-mono cursor-pointer"
+          title="Show keyboard shortcuts (?)"
+        >
+          <Keyboard size={12} />
+          <span>?</span>
+        </button>
+        <span class="font-mono text-xs text-neutral-500">B3 · B4 · B5</span>
+      </div>
     </header>
 
     {#if rtlStatus === 'idle'}
@@ -302,40 +361,44 @@
         Waiting for device picker…
       </div>
     {:else if rtlStatus === 'connected' || rtlStatus === 'streaming' || rtlStatus === 'closing'}
-      <dl class="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-2 mb-4 text-sm font-mono">
-        <div>
-          <dt class="text-neutral-500 text-xs">Center</dt>
-          <dd class="text-neutral-200">{formatHz(CENTER_FREQ)}</dd>
-        </div>
-        <div>
-          <dt class="text-neutral-500 text-xs">Sample rate</dt>
-          <dd class="text-neutral-200">{(SAMPLE_RATE / 1e6).toFixed(3)} MS/s</dd>
-        </div>
-        <div>
-          <dt class="text-neutral-500 text-xs">FFT</dt>
-          <dd class="text-neutral-200">{FFT_SIZE} bins · {FFT_RATE_HZ} Hz</dd>
-        </div>
-        <div>
-          <dt class="text-neutral-500 text-xs">Gain</dt>
-          <dd class="text-neutral-200">AGC</dd>
-        </div>
-      </dl>
+      <!-- VFO dial + mode/bw/gain row -->
+      <div class="mb-4 grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-4 items-end">
+        <VfoDial
+          centerFreq={tuning.centerFreq}
+          stepSize={tuning.stepSize}
+          onChange={(hz) => (tuning.centerFreq = hz)}
+        />
+        <dl class="grid grid-cols-4 lg:grid-cols-1 gap-x-4 gap-y-1 text-xs font-mono">
+          <div class="lg:flex lg:items-baseline lg:gap-2">
+            <dt class="text-neutral-500 uppercase">Mode</dt>
+            <dd class="text-neutral-200">{MODE_INFO[tuning.mode].label}</dd>
+          </div>
+          <div class="lg:flex lg:items-baseline lg:gap-2">
+            <dt class="text-neutral-500 uppercase">BW</dt>
+            <dd class="text-neutral-200">{formatHz(tuning.bandwidth)}</dd>
+          </div>
+          <div class="lg:flex lg:items-baseline lg:gap-2">
+            <dt class="text-neutral-500 uppercase">Step</dt>
+            <dd class="text-neutral-200">{formatHz(tuning.stepSize)}</dd>
+          </div>
+          <div class="lg:flex lg:items-baseline lg:gap-2">
+            <dt class="text-neutral-500 uppercase">Gain</dt>
+            <dd class="text-neutral-200">{gainLabel(tuning.gain)}</dd>
+          </div>
+        </dl>
+      </div>
 
       <div class="rounded-md overflow-hidden border border-neutral-800 mb-4 bg-black">
-        <canvas
-          bind:this={spectrumCanvas}
-          width={SPECTRUM_W}
-          height={SPECTRUM_H}
-          class="block w-full"
-          style="aspect-ratio: {SPECTRUM_W} / {SPECTRUM_H}"
-        ></canvas>
-        <canvas
-          bind:this={waterfallCanvas}
-          width={WATERFALL_W}
-          height={WATERFALL_H}
-          class="block w-full"
-          style="aspect-ratio: {WATERFALL_W} / {WATERFALL_H}"
-        ></canvas>
+        <SpectrumWaterfall
+          bins={latestBins}
+          centerFreq={tuning.centerFreq}
+          sampleRate={SAMPLE_RATE}
+          {dbMin}
+          {dbMax}
+          {colormap}
+          stepSize={tuning.stepSize}
+          onTune={onClickToTune}
+        />
       </div>
 
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4 text-xs font-mono">
@@ -455,7 +518,7 @@
   </section>
 
   <p class="text-xs text-neutral-500 max-w-lg text-center">
-    Pre-alpha · B4 complete · Next: B5 (tuning UI: keyboard + dial).
+    Pre-alpha · B5 complete · Press <kbd class="font-mono text-neutral-300">?</kbd> for shortcuts.
     <br />
     <a
       href="https://github.com/matsvandamme/moshon-sdr/blob/main/AGENTS.md"

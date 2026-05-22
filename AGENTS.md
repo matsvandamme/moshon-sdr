@@ -77,7 +77,7 @@ Each phase ends with a tagged commit. Each milestone is roughly one PR.
 - [x] **B3** RTL-SDR WebUSB driver via `@jtarrio/webrtlsdr` (Apache-2.0).
 - [x] **B4a** USB I/O moved to a Web Worker (verified — rate approaches 2.40 MS/s).
 - [x] **B4b** SAB ring buffer between USB + DSP workers; RustFFT (2048-bin, Hann window) via WASM in DSP worker; spectrum + waterfall Canvas 2D renderers; viridis/magma/classic colormaps; adjustable dB range. Target 30 fps at 2048-bin FFT (PRD M1.2, M1.4).
-- [ ] **B5** Tuning UI: keyboard hotkeys (`F`/`M`/`B`/`G`/etc.) + mouse/scroll + virtual VFO dial (PRD M1.5, M1.6)
+- [x] **B5** Tuning UI: keyboard hotkeys (`F`/`M`/`B`/`G`/`,`/`.`/`[`/`]`/`Space`/`?`); virtual VFO dial (click-drag horizontally to fine-tune, scroll-wheel to step); click anywhere on spectrum/waterfall to tune to that frequency; live frequency-axis labels above the waterfall. Live retune-while-streaming via worker `retune` message. (PRD M1.5, M1.6)
 - [ ] **B6** Demods: WFM (mono+stereo), NFM, AM, SSB (USB/LSB via Weaver) (PRD M1.3)
 - [ ] **B7** URL hash state + memory channels + IARU band overlay + S-meter (PRD M1.7–M1.10)
 - [ ] **B8** First-run onboarding with per-OS WebUSB setup links (PRD M1.11)
@@ -146,8 +146,9 @@ These are non-negotiable. Violating any of them is a stop-the-line event.
 - B1a: cleanup + project identity (LICENSE, README, .gitignore, etc.)
 - B1c: scaffold `web/` (Svelte 5 + Vite + Tailwind 4 + lucide-svelte), `dsp/` (Cargo crate stub with `smoke()` export), `bridge/` (Go module + stub main.go)
 - B1d: four GitHub Actions workflows (ci, deploy, bridge-release, claude-review) + GoReleaser config
-**Currently working on:** B4 verified end-to-end on hardware. Spectrum + waterfall live, all three colormaps + dB sliders confirmed working. Ready for B5 (tuning UI).
+**Currently working on:** B5 shipped. Ready for B6 (demodulation).
 **Blocked by:** None.
+**B5 hardware verification pending:** keyboard hotkeys (`?` for reference), drag the VFO dial, click anywhere on the spectrum/waterfall to retune, scroll-wheel to fine-tune. All should retune the dongle without restarting the stream.
 
 ## Agent behavior baseline
 

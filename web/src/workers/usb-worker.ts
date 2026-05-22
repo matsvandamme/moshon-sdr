@@ -27,9 +27,14 @@ type InboundInit = {
   iqRing: SharedArrayBuffer;
   statsIntervalMs: number;
 };
+type InboundRetune = {
+  kind: 'retune';
+  centerFreq?: number;
+  gain?: number | null;
+};
 type InboundStop = { kind: 'stop' };
 type InboundClose = { kind: 'close' };
-type Inbound = InboundInit | InboundStop | InboundClose;
+type Inbound = InboundInit | InboundRetune | InboundStop | InboundClose;
 
 type OutboundStarted = {
   kind: 'started';
@@ -125,6 +130,20 @@ async function readLoop() {
   }
 }
 
+async function retune(opts: InboundRetune) {
+  if (!device) return;
+  try {
+    if (typeof opts.centerFreq === 'number') {
+      await device.setCenterFrequency(opts.centerFreq);
+    }
+    if (opts.gain !== undefined) {
+      await device.setGain(opts.gain);
+    }
+  } catch (err) {
+    postOut({ kind: 'error', message: errMessage(err) });
+  }
+}
+
 async function stop() {
   running = false;
   if (statsTimer !== null) {
@@ -162,6 +181,9 @@ self.onmessage = (e: MessageEvent<Inbound>) => {
   switch (msg.kind) {
     case 'init':
       void init(msg);
+      break;
+    case 'retune':
+      void retune(msg);
       break;
     case 'stop':
       void stop();
