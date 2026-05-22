@@ -91,11 +91,17 @@
   });
 
   // Push volume / mute into the audio worklet whenever they change.
+  // IMPORTANT: read the reactive state UNCONDITIONALLY before the ready
+  // gate, otherwise Svelte 5 short-circuits and never tracks the dep — the
+  // effect runs once at mount (when audio isn't ready), reads nothing
+  // reactive, and is then dead. Capture into a local first.
   $effect(() => {
-    if (audio.isReady) audio.setVolume(volume);
+    const v = volume;
+    if (audio.isReady) audio.setVolume(v);
   });
   $effect(() => {
-    if (audio.isReady) audio.setMuted(tuning.muted);
+    const m = tuning.muted;
+    if (audio.isReady) audio.setMuted(m);
   });
 
   // ---- Retune effects ----

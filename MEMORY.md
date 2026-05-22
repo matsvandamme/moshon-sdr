@@ -27,6 +27,14 @@ Long-running notes that should survive across sessions but don't belong in the f
 - B4b known UI issue: colormap dropdown + dB sliders weren't visibly applying. Fixed by re-applying settings on every rAF tick instead of trusting `$effect` to fire when renderer instances (plain vars, not `$state`) aren't reactive deps.
 - Next milestone: **B5 — tuning UI** (keyboard hotkeys: `F`/`M`/`B`/`G`/`,`/`.`/`[`/`]`/`Space`/`?`; mouse: click waterfall to set center, scroll-wheel fine-tune, virtual VFO dial; PRD says both paths must reach parity).
 
+**As of B6a (live, audio working):**
+- B5 + B6a shipped. https://moshon-sdr.pages.dev plays broadcast FM (WFM mono).
+- Audio pipeline: Rust `WfmDemod` (2.4 MS/s → 240 kS/s IF via 10:1 windowed-sinc FIR → FM discriminator → 48 kS/s audio via 5:1 windowed-sinc FIR) → SAB-backed PCM ring → AudioWorklet (`web/public/audio-processor.js`) → speakers. AudioContext sample rate left at system default (no hard pin to 48 kHz — some systems reject that).
+- Worklet telemetry: posts `{kind:'ready'}` on construction and `{kind:'stats'}` every ~100ms with `samplesPlayed`, `samplesUnderrun`, `ringUsedBytes`. UI shows a 4-cell row when streaming.
+- **Svelte 5 reactivity gotcha** (bit me in B6a): `$effect(() => { if (audio.isReady) audio.setVolume(volume); })` short-circuits when `audio.isReady` is false on first run, never reads `volume`, never tracks it as a dep, becomes permanently dead. Fix: capture reactive state into a local FIRST, then gate. Pattern: `const v = volume; if (audio.isReady) audio.setVolume(v);`
+- NFM/AM/SSB/CW are mode-cycle UI only — actual demod lands in B6b–B6d.
+- Next milestone: **B6b** — NFM + AM demods (much simpler than WFM; single-stage envelope/quadrature demods on the existing channelizer chain).
+
 ## Open empirical questions (resolve in code, not in docs)
 
 - [ ] S-meter calibration for RTL-SDR v3 vs v4 — measure on a known reference signal once we have receive working
