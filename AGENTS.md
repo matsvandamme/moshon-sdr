@@ -146,9 +146,8 @@ These are non-negotiable. Violating any of them is a stop-the-line event.
 - B1a: cleanup + project identity (LICENSE, README, .gitignore, etc.)
 - B1c: scaffold `web/` (Svelte 5 + Vite + Tailwind 4 + lucide-svelte), `dsp/` (Cargo crate stub with `smoke()` export), `bridge/` (Go module + stub main.go)
 - B1d: four GitHub Actions workflows (ci, deploy, bridge-release, claude-review) + GoReleaser config
-**Currently working on:** B4 done end-to-end (USB worker → SAB → DSP worker → FFT → spectrum + waterfall). Ready for B5 (tuning UI: keyboard hotkeys + virtual VFO dial).
+**Currently working on:** B4 verified end-to-end on hardware. Spectrum + waterfall live, all three colormaps + dB sliders confirmed working. Ready for B5 (tuning UI).
 **Blocked by:** None.
-**B4b verification pending on hardware:** click Connect → Start, observe spectrum line and waterfall scrolling. Around 100 MHz you should see a couple of FM broadcast carriers as bright vertical bands in the waterfall and corresponding peaks in the spectrum. Render FPS should be ~30.
 
 ## Agent behavior baseline
 
