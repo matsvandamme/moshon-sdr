@@ -197,6 +197,43 @@ impl RealDecimator {
     }
 }
 
+/// Non-decimating complex FIR (real taps applied to I and Q). Single-sample
+/// `filter(z) -> z` API for use inside a per-sample loop.
+struct ComplexFir {
+    taps: Vec<f32>,
+    history: Vec<Complex<f32>>,
+    hist_pos: usize,
+}
+
+impl ComplexFir {
+    fn new(taps: Vec<f32>) -> Self {
+        let history = vec![Complex { re: 0.0, im: 0.0 }; taps.len()];
+        Self {
+            taps,
+            history,
+            hist_pos: 0,
+        }
+    }
+
+    fn filter(&mut self, x: Complex<f32>) -> Complex<f32> {
+        let n = self.taps.len();
+        self.history[self.hist_pos] = x;
+        self.hist_pos = (self.hist_pos + 1) % n;
+        let mut acc_re = 0.0f32;
+        let mut acc_im = 0.0f32;
+        for k in 0..n {
+            let h_idx = (self.hist_pos + k) % n;
+            let s = self.history[h_idx];
+            acc_re += s.re * self.taps[k];
+            acc_im += s.im * self.taps[k];
+        }
+        Complex {
+            re: acc_re,
+            im: acc_im,
+        }
+    }
+}
+
 /// Complex-valued FIR decimator (separate I and Q sub-filters sharing taps).
 struct ComplexDecimator {
     factor: usize,
@@ -527,6 +564,118 @@ impl Default for AmDemod {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// SSB demodulator — Weaver method (B6c)
+// ──────────────────────────────────────────────────────────────────────────
+//
+// Receiver flow:
+//   2.4 MS/s IQ
+//     → stage-1 wide LPF (≈100 kHz) → 240 kS/s
+//     → stage-2 channel LPF, cutoff = bandwidth_hz → 48 kS/s
+//     → Weaver: shift desired sideband to DC, real LPF at bw/2 to kill the
+//       image, shift back, take Re{} as audio.
+//
+// Sign convention: with the user tuned to the suppressed carrier, USB
+// occupies +0..+bandwidth in baseband IQ, LSB occupies −bandwidth..0.
+// For USB the Weaver NCO shifts DOWN by bandwidth/2 (then back UP);
+// for LSB it shifts UP (then back DOWN). A single sideband-sign multiplier
+// captures both.
+
+/// Minimum SSB passband. Anything narrower than 500 Hz gives filter ringing
+/// that dwarfs the desired signal.
+const SSB_BW_MIN: f32 = 500.0;
+/// Default SSB passband. Standard amateur voice bandwidth.
+const SSB_DEFAULT_BW: f32 = 2_400.0;
+
+/// Weaver-method single-sideband demodulator.
+#[wasm_bindgen]
+pub struct SsbDemod {
+    iq_decim: ComplexDecimator,
+    chan_decim: ComplexDecimator,
+    /// Weaver mixer phase accumulator (radians).
+    nco_phase: f32,
+    /// Phase increment per 48 kHz output sample = 2π·(bw/2)/48000.
+    nco_step: f32,
+    /// +1.0 = USB (shift DOWN, back UP). −1.0 = LSB (shift UP, back DOWN).
+    sideband_sign: f32,
+    /// Half-bandwidth LPF applied to the shifted IQ; kills the image sideband.
+    weaver_lpf: ComplexFir,
+    iq_in: Vec<Complex<f32>>,
+    iq_if: Vec<Complex<f32>>,
+    iq_chan: Vec<Complex<f32>>,
+}
+
+#[wasm_bindgen]
+impl SsbDemod {
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new(bandwidth_hz: f32, lsb: bool) -> SsbDemod {
+        let bw = bandwidth_hz.clamp(SSB_BW_MIN, NARROW_BW_MAX);
+        let stage1 = build_stage1_iq_taps();
+        // Stage 2 cutoff = full audio width (not half) — we want both sidebands
+        // at this point; the Weaver LPF downstream picks one.
+        let stage2 = lowpass_taps(63, bw / NARROW_IF_RATE);
+        // Weaver LPF cutoff = bw/2 at the 48 kHz audio rate.
+        let weaver_taps = lowpass_taps(47, (bw / 2.0) / AUDIO_RATE);
+        let nco_step = 2.0 * PI * (bw / 2.0) / AUDIO_RATE;
+        let sideband_sign = if lsb { -1.0 } else { 1.0 };
+        SsbDemod {
+            iq_decim: ComplexDecimator::new(NARROW_IF_DECIM, stage1),
+            chan_decim: ComplexDecimator::new(NARROW_AUDIO_DECIM, stage2),
+            nco_phase: 0.0,
+            nco_step,
+            sideband_sign,
+            weaver_lpf: ComplexFir::new(weaver_taps),
+            iq_in: Vec::with_capacity(65_536),
+            iq_if: Vec::with_capacity(65_536 / NARROW_IF_DECIM + 16),
+            iq_chan: Vec::with_capacity(65_536 / (NARROW_IF_DECIM * NARROW_AUDIO_DECIM) + 16),
+        }
+    }
+
+    #[must_use]
+    pub fn process(&mut self, iq_bytes: &[u8]) -> Vec<f32> {
+        u8_iq_to_complex(iq_bytes, &mut self.iq_in);
+
+        self.iq_if.clear();
+        self.iq_decim.process(&self.iq_in, &mut self.iq_if);
+
+        self.iq_chan.clear();
+        self.chan_decim.process(&self.iq_if, &mut self.iq_chan);
+
+        let mut audio = Vec::with_capacity(self.iq_chan.len());
+        let s = self.sideband_sign;
+        for &z in &self.iq_chan {
+            let (sin_p, cos_p) = self.nco_phase.sin_cos();
+            // Shift by ∓bw/2: multiply by e^(∓j·φ).
+            let nco_down = Complex {
+                re: cos_p,
+                im: -s * sin_p,
+            };
+            let z_shifted = z * nco_down;
+            // Kill the image sideband.
+            let z_filt = self.weaver_lpf.filter(z_shifted);
+            // Shift back: multiply by e^(±j·φ). Take Re{} for audio.
+            let nco_back = Complex {
+                re: cos_p,
+                im: s * sin_p,
+            };
+            audio.push((z_filt * nco_back).re);
+
+            self.nco_phase += self.nco_step;
+            if self.nco_phase >= 2.0 * PI {
+                self.nco_phase -= 2.0 * PI;
+            }
+        }
+        audio
+    }
+}
+
+impl Default for SsbDemod {
+    fn default() -> Self {
+        Self::new(SSB_DEFAULT_BW, false)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -534,7 +683,8 @@ impl Default for AmDemod {
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::cast_precision_loss
+    clippy::cast_precision_loss,
+    clippy::similar_names
 )]
 mod tests {
     use super::*;
@@ -718,6 +868,54 @@ mod tests {
         assert!(
             mean.abs() < 0.05,
             "AM output not DC-blocked (mean = {mean})"
+        );
+    }
+
+    /// Synthesize a pure complex tone at +1 kHz (USB side). The USB demod
+    /// should recover an audible 1 kHz tone; the LSB demod, fed the same
+    /// signal, should be at least 6 dB down (= half-amplitude) because the
+    /// +1 kHz tone is outside the LSB passband.
+    #[test]
+    fn ssb_demod_separates_sidebands() {
+        let chunk_samples = 96_000usize; // 40 ms — long enough for two warm-up passes plus measurement
+        let mut iq = vec![0u8; chunk_samples * 2];
+        let tone_freq = 1_000.0_f32;
+        let amp = 100.0_f32;
+        for n in 0..chunk_samples {
+            let t = n as f32 / WFM_INPUT_RATE;
+            let phase = 2.0 * PI * tone_freq * t;
+            iq[2 * n] = f32_to_u8(amp * phase.cos() + 127.5);
+            iq[2 * n + 1] = f32_to_u8(amp * phase.sin() + 127.5);
+        }
+
+        let mut usb = SsbDemod::new(2_400.0, false);
+        let _ = usb.process(&iq);
+        let audio_usb = usb.process(&iq);
+
+        let mut lsb = SsbDemod::new(2_400.0, true);
+        let _ = lsb.process(&iq);
+        let audio_lsb = lsb.process(&iq);
+
+        // 96_000 / 50 = 1920 audio samples.
+        assert!(
+            audio_usb.len() >= 1850 && audio_usb.len() <= 1950,
+            "unexpected USB audio length: {}",
+            audio_usb.len()
+        );
+
+        let max_usb = audio_usb.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+        let max_lsb = audio_lsb.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+
+        assert!(
+            max_usb > 0.1,
+            "USB demod silent on USB tone (max = {max_usb})"
+        );
+        assert!(max_usb < 2.0, "USB demod overshoots (max = {max_usb})");
+        // Sideband suppression: the +1 kHz tone in the USB band must produce
+        // a much smaller signal on the LSB demod than on the USB demod.
+        assert!(
+            max_lsb < 0.5 * max_usb,
+            "LSB suppression failed: USB max = {max_usb}, LSB max = {max_lsb}",
         );
     }
 }

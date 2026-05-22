@@ -6,16 +6,23 @@
  * SAB ring to the AudioWorklet.
  *
  * Demod modes implemented:
- *   - WFM (B6a)  — broadcast FM mono
- *   - NFM (B6b)  — narrowband FM, user-set bandwidth
- *   - AM  (B6b)  — envelope detector, user-set bandwidth
+ *   - WFM (B6a)   — broadcast FM mono
+ *   - NFM (B6b)   — narrowband FM, user-set bandwidth
+ *   - AM  (B6b)   — envelope detector, user-set bandwidth
+ *   - USB (B6c)   — Weaver SSB, upper sideband
+ *   - LSB (B6c)   — Weaver SSB, lower sideband
  *
- * SSB/CW land in B6c–B6d. For now they fall back to NFM so the audio path
- * still produces something audible while the user can tell from the UI
- * label that the demodulator is wrong.
+ * CW lands in B6d. For now it falls back to USB at a narrow bandwidth so
+ * users can still hear morse pitched against a BFO offset.
  */
 
-import init, { AmDemod, FftContext, NfmDemod, WfmDemod } from '../lib/dsp/wasm/moshon_dsp.js';
+import init, {
+  AmDemod,
+  FftContext,
+  NfmDemod,
+  SsbDemod,
+  WfmDemod,
+} from '../lib/dsp/wasm/moshon_dsp.js';
 import { SabRing } from '../lib/ring/sab-ring';
 
 export type DemodMode = 'wfm' | 'nfm' | 'am' | 'usb' | 'lsb' | 'cw';
@@ -66,13 +73,16 @@ function buildDemod(mode: DemodMode, bandwidthHz: number): Demod {
     case 'am':
       return new AmDemod(bandwidthHz);
     case 'nfm':
+      return new NfmDemod(bandwidthHz);
     case 'usb':
+      return new SsbDemod(bandwidthHz, false);
     case 'lsb':
+      return new SsbDemod(bandwidthHz, true);
     case 'cw':
     default:
-      // SSB/CW not implemented yet — fall back to NFM so the chain still
-      // produces audio while the UI label tells the user it's the wrong demod.
-      return new NfmDemod(bandwidthHz);
+      // CW lands in B6d. For now treat it as a narrow USB so morse audio
+      // is still pitched against the tuned offset.
+      return new SsbDemod(Math.max(500, bandwidthHz), false);
   }
 }
 

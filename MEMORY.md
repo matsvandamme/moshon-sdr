@@ -35,6 +35,15 @@ Long-running notes that should survive across sessions but don't belong in the f
 - NFM/AM/SSB/CW are mode-cycle UI only — actual demod lands in B6b–B6d.
 - Next milestone: **B6b** — NFM + AM demods (much simpler than WFM; single-stage envelope/quadrature demods on the existing channelizer chain).
 
+**As of B6c (SSB live):**
+- B6c shipped. `SsbDemod` (Weaver method) handles both USB and LSB via a single struct with an `lsb: bool` constructor arg. Worker maps modes accordingly.
+- Weaver chain at 48 kHz: shift desired sideband to DC via complex NCO at ±BW/2 → real-coefficient LPF at BW/2 (kills image sideband) → shift back → take Re{} for audio.
+- Stage-2 channel filter cutoff is set to the full audio bandwidth (`bandwidth_hz`) instead of `bandwidth/2` like NFM/AM, because the Weaver LPF picks the sideband — the channel filter just needs to admit both possible sidebands.
+- New utility: `ComplexFir` (non-decimating single-sample-API FIR for complex samples) — used by the Weaver LPF.
+- Test pattern: a +1 kHz complex tone is in the USB passband. USB demod recovers it; LSB demod produces at least 6 dB lower amplitude on the same input. Same warm-up-pass trick as NFM (filter transients dominate one pass on a cold demod).
+- CW (B6d) is the last remaining mode; currently falls back to a narrow USB.
+- Next milestone: **B6d** — proper CW with BFO offset, narrow filter, optional auto-decode.
+
 **As of B6b (NFM + AM live):**
 - B6b shipped. `NfmDemod` (quadrature FM) and `AmDemod` (envelope + DC block) added to [dsp/src/lib.rs](dsp/src/lib.rs). Both share a two-stage channelizer: 2.4 MS/s → 240 kS/s (31-tap stage-1 LPF, same as WFM) → 48 kS/s (63-tap channel filter with cutoff at `bandwidth/2`).
 - DSP worker now holds a single `Demod` slot and rebuilds it on a `setMode` message. `RtlSdrSource.setMode(mode, bandwidthHz)` exposes that to the UI. App.svelte fires it from a single `$effect` watching `tuning.mode` + `tuning.bandwidth`.
