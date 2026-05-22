@@ -1,25 +1,20 @@
 /**
  * USB Worker — owns the RTL-SDR USBDevice and runs the readSamples loop.
  *
- * Receives a USBDevice from the main thread (transferred, not copied — the
- * main thread loses access after the postMessage). Runs `readSamples` in
- * a tight async loop, posting each chunk back to the main thread with the
- * ArrayBuffer marked transferable to avoid copying.
+ * The main thread grants device permission via requestDevice() and sends us
+ * the identifiers + a SharedArrayBuffer ring. We look up the device by
+ * VID/PID/serial via navigator.usb.getDevices() (USBDevice isn't
+ * transferable to Workers), open it, configure it, then write IQ samples
+ * into the ring as fast as the device produces them. A separate DSP worker
+ * consumes the ring.
  *
- * Decoupling USB I/O from the main thread is what B4a buys us: the read loop
- * is no longer fighting Svelte re-renders for CPU. B4b will replace
- * postMessage with a SharedArrayBuffer ring + a dedicated DSP worker.
+ * Stats (sample count, dropped count) are posted back to main periodically
+ * for the live counter UI.
  */
 
 import { RTL2832U, type RtlDevice, type SampleBlock } from '@jtarrio/webrtlsdr/rtlsdr.js';
+import { SabRing } from '../lib/ring/sab-ring';
 
-/**
- * USBDevice instances are NOT structured-cloneable / transferable, so the
- * main thread can't postMessage a device to us. Instead, after the main
- * thread grants permission via navigator.usb.requestDevice(), it sends us
- * the device's identifiers and we look it up via navigator.usb.getDevices().
- * Permissions are per-origin, so the device is visible to us once granted.
- */
 type InboundInit = {
   kind: 'init';
   vendorId: number;
@@ -29,8 +24,9 @@ type InboundInit = {
   centerFreq: number;
   gain: number | null;
   chunkSamples: number;
+  iqRing: SharedArrayBuffer;
+  statsIntervalMs: number;
 };
-
 type InboundStop = { kind: 'stop' };
 type InboundClose = { kind: 'close' };
 type Inbound = InboundInit | InboundStop | InboundClose;
@@ -40,22 +36,26 @@ type OutboundStarted = {
   actualSampleRate: number;
   actualFrequency: number;
 };
-type OutboundSamples = {
-  kind: 'samples';
-  data: ArrayBuffer;
-  frequency: number;
-  directSampling: boolean;
+type OutboundStats = {
+  kind: 'stats';
+  bytesWritten: number;
+  bytesDropped: number;
+  time: number;
 };
 type OutboundStopped = { kind: 'stopped' };
 type OutboundError = { kind: 'error'; message: string };
-type Outbound = OutboundStarted | OutboundSamples | OutboundStopped | OutboundError;
+type Outbound = OutboundStarted | OutboundStats | OutboundStopped | OutboundError;
 
 let device: RtlDevice | null = null;
+let ring: SabRing | null = null;
 let running = false;
 let chunkSize = 65_536;
+let bytesWrittenTotal = 0;
+let statsIntervalMs = 250;
+let statsTimer: ReturnType<typeof setInterval> | null = null;
 
-function postOut(msg: Outbound, transfer: Transferable[] = []) {
-  self.postMessage(msg, { transfer });
+function postOut(msg: Outbound) {
+  self.postMessage(msg);
 }
 
 async function init(opts: InboundInit) {
@@ -75,16 +75,23 @@ async function init(opts: InboundInit) {
         `Device ${opts.vendorId.toString(16)}:${opts.productId.toString(16)} not found in granted devices`,
       );
     }
+
+    ring = new SabRing(opts.iqRing);
+    ring.reset();
+    bytesWrittenTotal = 0;
+    chunkSize = opts.chunkSamples;
+    statsIntervalMs = opts.statsIntervalMs;
+
     await usbDevice.open();
     device = await RTL2832U.open(usbDevice);
     const actualSampleRate = await device.setSampleRate(opts.sampleRate);
     const actualFrequency = await device.setCenterFrequency(opts.centerFreq);
     await device.setGain(opts.gain);
     await device.resetBuffer();
-    chunkSize = opts.chunkSamples;
 
     postOut({ kind: 'started', actualSampleRate, actualFrequency });
 
+    statsTimer = setInterval(emitStats, statsIntervalMs);
     running = true;
     void readLoop();
   } catch (err) {
@@ -92,8 +99,18 @@ async function init(opts: InboundInit) {
   }
 }
 
+function emitStats() {
+  if (!ring) return;
+  postOut({
+    kind: 'stats',
+    bytesWritten: bytesWrittenTotal,
+    bytesDropped: ring.getDropped(),
+    time: performance.now(),
+  });
+}
+
 async function readLoop() {
-  while (running && device) {
+  while (running && device && ring) {
     let block: SampleBlock;
     try {
       block = await device.readSamples(chunkSize);
@@ -102,34 +119,38 @@ async function readLoop() {
       postOut({ kind: 'error', message: errMessage(err) });
       return;
     }
-    postOut(
-      {
-        kind: 'samples',
-        data: block.data,
-        frequency: block.frequency,
-        directSampling: block.directSampling,
-      },
-      [block.data]
-    );
+    const bytes = new Uint8Array(block.data);
+    ring.write(bytes);
+    bytesWrittenTotal += bytes.length;
   }
 }
 
 async function stop() {
   running = false;
+  if (statsTimer !== null) {
+    clearInterval(statsTimer);
+    statsTimer = null;
+  }
+  emitStats();
   postOut({ kind: 'stopped' });
 }
 
 async function close() {
   running = false;
+  if (statsTimer !== null) {
+    clearInterval(statsTimer);
+    statsTimer = null;
+  }
   if (device) {
     try {
       await device.close();
     } catch {
-      // Ignore close errors — device may already be gone.
+      // device may already be gone — ignore
     } finally {
       device = null;
     }
   }
+  ring = null;
 }
 
 function errMessage(err: unknown): string {

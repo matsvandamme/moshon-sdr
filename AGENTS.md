@@ -74,8 +74,9 @@ Each phase ends with a tagged commit. Each milestone is roughly one PR.
 - [x] **B2** COOP/COEP headers (folded into B1 — set in both `vite.config.ts` and `web/public/_headers`)
 
 ### Phase 2 — M1 must-haves (weeks 1–9)
-- [x] **B3** RTL-SDR WebUSB driver via `@jtarrio/webrtlsdr` (Apache-2.0). Raw IQ flowing to a UI counter at 2.4 MS/s, 100 MHz center, AGC. SharedArrayBuffer ring deferred to B4 when DSP needs it.
-- [ ] **B4** DSP worker: RustFFT spectrum + Canvas 2D waterfall at 30 fps minimum (PRD M1.2, M1.4)
+- [x] **B3** RTL-SDR WebUSB driver via `@jtarrio/webrtlsdr` (Apache-2.0).
+- [x] **B4a** USB I/O moved to a Web Worker (verified — rate approaches 2.40 MS/s).
+- [x] **B4b** SAB ring buffer between USB + DSP workers; RustFFT (2048-bin, Hann window) via WASM in DSP worker; spectrum + waterfall Canvas 2D renderers; viridis/magma/classic colormaps; adjustable dB range. Target 30 fps at 2048-bin FFT (PRD M1.2, M1.4).
 - [ ] **B5** Tuning UI: keyboard hotkeys (`F`/`M`/`B`/`G`/etc.) + mouse/scroll + virtual VFO dial (PRD M1.5, M1.6)
 - [ ] **B6** Demods: WFM (mono+stereo), NFM, AM, SSB (USB/LSB via Weaver) (PRD M1.3)
 - [ ] **B7** URL hash state + memory channels + IARU band overlay + S-meter (PRD M1.7–M1.10)
@@ -145,10 +146,9 @@ These are non-negotiable. Violating any of them is a stop-the-line event.
 - B1a: cleanup + project identity (LICENSE, README, .gitignore, etc.)
 - B1c: scaffold `web/` (Svelte 5 + Vite + Tailwind 4 + lucide-svelte), `dsp/` (Cargo crate stub with `smoke()` export), `bridge/` (Go module + stub main.go)
 - B1d: four GitHub Actions workflows (ci, deploy, bridge-release, claude-review) + GoReleaser config
-**Currently working on:** B4a complete (USB I/O moved to a Worker). Ready for B4b (RustFFT spectrum + Canvas 2D waterfall).
+**Currently working on:** B4 done end-to-end (USB worker → SAB → DSP worker → FFT → spectrum + waterfall). Ready for B5 (tuning UI: keyboard hotkeys + virtual VFO dial).
 **Blocked by:** None.
-**B3 verified on author's hardware** at https://moshon-sdr.pages.dev — Received 81.79 MS @ ~2.18 MS/s on first test (Zadig'd SDR ADS-B dongle). Rate < target attributed to main-thread USB-vs-UI contention; B4a addresses this by moving the read loop to a Web Worker.
-**Next manual verification (after B4a deploys):** click Connect → Start. Expect rate closer to 2.40 MS/s now that the read loop is off the main thread.
+**B4b verification pending on hardware:** click Connect → Start, observe spectrum line and waterfall scrolling. Around 100 MHz you should see a couple of FM broadcast carriers as bright vertical bands in the waterfall and corresponding peaks in the spectrum. Render FPS should be ~30.
 
 ## Agent behavior baseline
 

@@ -12,26 +12,54 @@
   import { onMount, onDestroy } from 'svelte';
   import init, { smoke } from './lib/dsp/wasm/moshon_dsp.js';
   import { RtlSdrSource, type RtlSdrStatus } from './lib/usb/rtlsdr-source';
+  import {
+    SpectrumRenderer,
+    WaterfallRenderer,
+    type ColormapName,
+  } from './lib/visualizer/spectrum-waterfall';
 
-  // ---- WASM smoke test (B1) ----
+  // ---- WASM smoke (B1) ----
   type WasmStatus = 'pending' | 'ready' | 'error';
   let wasmStatus = $state<WasmStatus>('pending');
   let wasmError = $state<string | null>(null);
   let smokeResult = $state<number | null>(null);
 
-  // ---- RTL-SDR (B3) ----
+  // ---- RTL-SDR (B3 + B4) ----
   const SAMPLE_RATE = 2_400_000;
   const CENTER_FREQ = 100_000_000; // 100 MHz — FM broadcast band
-  const BYTES_PER_SAMPLE = 2; // 8-bit I + 8-bit Q
+  const FFT_SIZE = 2048;
+  const FFT_RATE_HZ = 30;
+
+  const SPECTRUM_W = 1024;
+  const SPECTRUM_H = 200;
+  const WATERFALL_W = 1024;
+  const WATERFALL_H = 400;
 
   const source = new RtlSdrSource();
+
   let rtlStatus = $state<RtlSdrStatus>('idle');
   let rtlError = $state<string | null>(null);
-  let samplesTotal = $state(0); // running count of IQ samples received
-  let streamStartMs = $state<number | null>(null); // timestamp of stream start
-  let elapsedMs = $state(0); // ticked from rAF for live display
+  let bytesWritten = $state(0);
+  let bytesDropped = $state(0);
+  let streamStartMs = $state<number | null>(null);
+  let elapsedMs = $state(0);
+  let fftFramesRendered = $state(0);
+
+  let dbMin = $state(-100);
+  let dbMax = $state(-20);
+  let colormap = $state<ColormapName>('viridis');
+
+  let spectrumCanvas: HTMLCanvasElement | undefined = $state();
+  let waterfallCanvas: HTMLCanvasElement | undefined = $state();
+  let spectrumRenderer: SpectrumRenderer | null = null;
+  let waterfallRenderer: WaterfallRenderer | null = null;
+
+  let latestBins: Float32Array | null = null;
   let rafHandle = 0;
-  let unsubscribeSamples: (() => void) | null = null;
+  let unsubStats: (() => void) | null = null;
+  let unsubFft: (() => void) | null = null;
+
+  // ---- Lifecycle ----
 
   onMount(async () => {
     try {
@@ -44,17 +72,49 @@
     }
   });
 
+  // Wire renderers once the canvases land in the DOM, and re-wire if dbMin/
+  // dbMax/colormap change.
+  $effect(() => {
+    if (spectrumCanvas && !spectrumRenderer) {
+      spectrumRenderer = new SpectrumRenderer(spectrumCanvas, { dbMin, dbMax });
+    }
+    if (waterfallCanvas && !waterfallRenderer) {
+      waterfallRenderer = new WaterfallRenderer(waterfallCanvas, { dbMin, dbMax, colormap });
+    }
+  });
+
+  $effect(() => {
+    spectrumRenderer?.setRange(dbMin, dbMax);
+    waterfallRenderer?.setRange(dbMin, dbMax);
+  });
+
+  $effect(() => {
+    waterfallRenderer?.setColormap(colormap);
+  });
+
   onDestroy(() => {
     cancelAnimationFrame(rafHandle);
+    unsubStats?.();
+    unsubFft?.();
     void source.disconnect();
   });
 
-  function tickElapsed() {
+  // ---- Render loop ----
+
+  function tick() {
     if (streamStartMs !== null) {
       elapsedMs = performance.now() - streamStartMs;
     }
-    rafHandle = requestAnimationFrame(tickElapsed);
+    if (latestBins) {
+      spectrumRenderer?.draw(latestBins);
+      waterfallRenderer?.push(latestBins);
+      latestBins = null;
+      fftFramesRendered++;
+    }
+    rafHandle = requestAnimationFrame(tick);
   }
+
+  // ---- Button actions ----
 
   async function onConnect() {
     rtlError = null;
@@ -70,30 +130,43 @@
 
   async function onStart() {
     rtlError = null;
-    samplesTotal = 0;
+    bytesWritten = 0;
+    bytesDropped = 0;
+    fftFramesRendered = 0;
     streamStartMs = performance.now();
     elapsedMs = 0;
 
-    unsubscribeSamples?.();
-    unsubscribeSamples = source.onSamples((evt) => {
-      samplesTotal += evt.data.byteLength / BYTES_PER_SAMPLE;
+    unsubStats?.();
+    unsubFft?.();
+    unsubStats = source.onStats((s) => {
+      bytesWritten = s.bytesWritten;
+      bytesDropped = s.bytesDropped;
+    });
+    unsubFft = source.onFft((evt) => {
+      // Keep only the latest frame; the rAF tick drains it. If FFTs arrive
+      // faster than rAF, intermediate frames are dropped (intentional).
+      latestBins = evt.bins;
     });
 
-    rafHandle = requestAnimationFrame(tickElapsed);
+    rafHandle = requestAnimationFrame(tick);
 
     try {
       rtlStatus = 'streaming';
       await source.start({
         sampleRate: SAMPLE_RATE,
         centerFreq: CENTER_FREQ,
-        gain: null, // AGC
+        gain: null,
+        fftSize: FFT_SIZE,
+        fftRateHz: FFT_RATE_HZ,
       });
     } catch (err) {
       rtlStatus = 'error';
       rtlError = err instanceof Error ? err.message : String(err);
-      unsubscribeSamples?.();
-      unsubscribeSamples = null;
       cancelAnimationFrame(rafHandle);
+      unsubStats?.();
+      unsubFft?.();
+      unsubStats = null;
+      unsubFft = null;
     }
   }
 
@@ -102,28 +175,32 @@
     rtlStatus = 'closing';
     try {
       await source.stop();
-      // After stop, the device stays open but the worker no longer holds a
-      // reference we can re-use. Treat stop+restart as a full re-connect.
       await source.disconnect();
       rtlStatus = 'idle';
     } catch (err) {
       rtlStatus = 'error';
       rtlError = err instanceof Error ? err.message : String(err);
     } finally {
-      unsubscribeSamples?.();
-      unsubscribeSamples = null;
+      unsubStats?.();
+      unsubFft?.();
+      unsubStats = null;
+      unsubFft = null;
     }
   }
 
   async function onDisconnect() {
     cancelAnimationFrame(rafHandle);
-    unsubscribeSamples?.();
-    unsubscribeSamples = null;
+    unsubStats?.();
+    unsubFft?.();
+    unsubStats = null;
+    unsubFft = null;
     rtlStatus = 'closing';
     try {
       await source.disconnect();
       rtlStatus = 'idle';
-      samplesTotal = 0;
+      bytesWritten = 0;
+      bytesDropped = 0;
+      fftFramesRendered = 0;
       streamStartMs = null;
       elapsedMs = 0;
     } catch (err) {
@@ -132,68 +209,70 @@
     }
   }
 
+  // ---- Derived display values ----
+
+  const BYTES_PER_SAMPLE = 2;
+  let samplesTotal = $derived(bytesWritten / BYTES_PER_SAMPLE);
+  let rateMSps = $derived(
+    elapsedMs > 0 ? samplesTotal / 1e6 / (elapsedMs / 1000) : 0,
+  );
+  let renderFps = $derived(
+    elapsedMs > 0 ? fftFramesRendered / (elapsedMs / 1000) : 0,
+  );
+
   function formatHz(hz: number): string {
     if (hz >= 1e9) return `${(hz / 1e9).toFixed(3)} GHz`;
     if (hz >= 1e6) return `${(hz / 1e6).toFixed(3)} MHz`;
     if (hz >= 1e3) return `${(hz / 1e3).toFixed(1)} kHz`;
     return `${hz} Hz`;
   }
-
   function formatMSamples(n: number): string {
     if (n >= 1e6) return `${(n / 1e6).toFixed(2)} MS`;
     if (n >= 1e3) return `${(n / 1e3).toFixed(1)} kS`;
     return `${n} S`;
   }
-
-  let rateMSps = $derived(
-    elapsedMs > 0 ? (samplesTotal / 1e6) / (elapsedMs / 1000) : 0
-  );
 </script>
 
-<main class="min-h-full flex flex-col items-center justify-center px-6 py-10 text-center gap-8">
-  <div>
-    <div class="flex items-center gap-3 text-(--color-accent)">
+<main class="min-h-full flex flex-col items-center px-4 py-8 gap-6">
+  <header class="text-center">
+    <div class="flex items-center gap-3 text-(--color-accent) justify-center">
       <Radio size={32} strokeWidth={1.5} />
       <h1 class="text-3xl font-medium tracking-tight">Moshon SDR</h1>
     </div>
-    <p class="mt-3 text-neutral-400 max-w-md">
+    <p class="mt-2 text-neutral-400 max-w-md">
       A ham's SDR receiver. In your browser. No install.
     </p>
-  </div>
+    <div
+      class="mt-4 inline-flex items-center gap-2 rounded-md border border-neutral-800 bg-neutral-900 px-3 py-2 font-mono text-xs"
+    >
+      {#if wasmStatus === 'pending'}
+        <Loader2 size={14} class="animate-spin text-neutral-400" />
+        <span class="text-neutral-400">Loading DSP module…</span>
+      {:else if wasmStatus === 'ready'}
+        <CircleCheck size={14} class="text-emerald-400" />
+        <span class="text-neutral-300">
+          DSP smoke test: <span class="text-(--color-accent)">{smokeResult}</span>
+        </span>
+      {:else}
+        <CircleAlert size={14} class="text-amber-400" />
+        <span class="text-amber-400">DSP failed: {wasmError}</span>
+      {/if}
+    </div>
+  </header>
 
-  <!-- WASM smoke test (B1) -->
-  <div
-    class="inline-flex items-center gap-2 rounded-md border border-neutral-800 bg-neutral-900 px-3 py-2 font-mono text-xs"
-  >
-    {#if wasmStatus === 'pending'}
-      <Loader2 size={14} class="animate-spin text-neutral-400" />
-      <span class="text-neutral-400">Loading DSP module…</span>
-    {:else if wasmStatus === 'ready'}
-      <CircleCheck size={14} class="text-emerald-400" />
-      <span class="text-neutral-300">
-        DSP smoke test: <span class="text-(--color-accent)">{smokeResult}</span>
-      </span>
-    {:else}
-      <CircleAlert size={14} class="text-amber-400" />
-      <span class="text-amber-400">DSP failed: {wasmError}</span>
-    {/if}
-  </div>
-
-  <!-- RTL-SDR (B3) -->
   <section
-    class="w-full max-w-xl rounded-lg border border-neutral-800 bg-neutral-950/60 p-5 text-left"
+    class="w-full max-w-5xl rounded-lg border border-neutral-800 bg-neutral-950/60 p-5"
   >
     <header class="flex items-center justify-between mb-4">
       <h2 class="text-sm font-medium text-neutral-300 uppercase tracking-wide">
-        RTL-SDR (WebUSB)
+        RTL-SDR (WebUSB) · Spectrum &amp; Waterfall
       </h2>
-      <span class="font-mono text-xs text-neutral-500">B3 · M1.1</span>
+      <span class="font-mono text-xs text-neutral-500">B3 · B4 · M1.1–1.4</span>
     </header>
 
     {#if rtlStatus === 'idle'}
       <p class="text-sm text-neutral-400 mb-4">
-        Plug in an RTL-SDR Blog v3/v4 dongle, then click Connect. The browser
-        will show a device picker — pick your dongle.
+        Plug in an RTL-SDR Blog v3/v4 dongle and click Connect.
       </p>
       <button
         type="button"
@@ -209,30 +288,99 @@
         Waiting for device picker…
       </div>
     {:else if rtlStatus === 'connected' || rtlStatus === 'streaming' || rtlStatus === 'closing'}
-      <dl class="grid grid-cols-2 gap-x-6 gap-y-2 mb-4 text-sm font-mono">
-        <dt class="text-neutral-500">Center frequency</dt>
-        <dd class="text-neutral-200">{formatHz(CENTER_FREQ)}</dd>
-        <dt class="text-neutral-500">Sample rate</dt>
-        <dd class="text-neutral-200">{(SAMPLE_RATE / 1e6).toFixed(3)} MS/s</dd>
-        <dt class="text-neutral-500">Gain</dt>
-        <dd class="text-neutral-200">AGC</dd>
+      <dl class="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-2 mb-4 text-sm font-mono">
+        <div>
+          <dt class="text-neutral-500 text-xs">Center</dt>
+          <dd class="text-neutral-200">{formatHz(CENTER_FREQ)}</dd>
+        </div>
+        <div>
+          <dt class="text-neutral-500 text-xs">Sample rate</dt>
+          <dd class="text-neutral-200">{(SAMPLE_RATE / 1e6).toFixed(3)} MS/s</dd>
+        </div>
+        <div>
+          <dt class="text-neutral-500 text-xs">FFT</dt>
+          <dd class="text-neutral-200">{FFT_SIZE} bins · {FFT_RATE_HZ} Hz</dd>
+        </div>
+        <div>
+          <dt class="text-neutral-500 text-xs">Gain</dt>
+          <dd class="text-neutral-200">AGC</dd>
+        </div>
       </dl>
 
-      {#if rtlStatus === 'streaming' || (rtlStatus === 'closing' && samplesTotal > 0)}
+      <div class="rounded-md overflow-hidden border border-neutral-800 mb-4 bg-black">
+        <canvas
+          bind:this={spectrumCanvas}
+          width={SPECTRUM_W}
+          height={SPECTRUM_H}
+          class="block w-full"
+          style="aspect-ratio: {SPECTRUM_W} / {SPECTRUM_H}"
+        ></canvas>
+        <canvas
+          bind:this={waterfallCanvas}
+          width={WATERFALL_W}
+          height={WATERFALL_H}
+          class="block w-full"
+          style="aspect-ratio: {WATERFALL_W} / {WATERFALL_H}"
+        ></canvas>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4 text-xs font-mono">
+        <label class="flex flex-col gap-1">
+          <span class="text-neutral-500 uppercase">Colormap</span>
+          <select
+            bind:value={colormap}
+            class="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-neutral-200"
+          >
+            <option value="viridis">Viridis</option>
+            <option value="magma">Magma</option>
+            <option value="classic">Classic</option>
+          </select>
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="text-neutral-500 uppercase">dB min ({dbMin})</span>
+          <input
+            type="range"
+            min="-120"
+            max="-40"
+            step="1"
+            bind:value={dbMin}
+          />
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="text-neutral-500 uppercase">dB max ({dbMax})</span>
+          <input
+            type="range"
+            min="-60"
+            max="0"
+            step="1"
+            bind:value={dbMax}
+          />
+        </label>
+      </div>
+
+      {#if rtlStatus === 'streaming' || (rtlStatus === 'closing' && bytesWritten > 0)}
         <dl
-          class="grid grid-cols-3 gap-2 mb-4 rounded-md border border-neutral-800 bg-neutral-900 p-3 font-mono text-sm"
+          class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-4 rounded-md border border-neutral-800 bg-neutral-900 p-3 font-mono text-xs"
         >
           <div>
-            <dt class="text-xs text-neutral-500">Received</dt>
-            <dd class="text-(--color-accent) text-base">{formatMSamples(samplesTotal)}</dd>
+            <dt class="text-neutral-500">Received</dt>
+            <dd class="text-(--color-accent) text-sm">{formatMSamples(samplesTotal)}</dd>
           </div>
           <div>
-            <dt class="text-xs text-neutral-500">Rate</dt>
-            <dd class="text-neutral-200 text-base">{rateMSps.toFixed(2)} MS/s</dd>
+            <dt class="text-neutral-500">USB rate</dt>
+            <dd class="text-neutral-200 text-sm">{rateMSps.toFixed(2)} MS/s</dd>
           </div>
           <div>
-            <dt class="text-xs text-neutral-500">Elapsed</dt>
-            <dd class="text-neutral-200 text-base">{(elapsedMs / 1000).toFixed(1)} s</dd>
+            <dt class="text-neutral-500">Render</dt>
+            <dd class="text-neutral-200 text-sm">{renderFps.toFixed(1)} fps</dd>
+          </div>
+          <div>
+            <dt class="text-neutral-500">Elapsed</dt>
+            <dd class="text-neutral-200 text-sm">{(elapsedMs / 1000).toFixed(1)} s</dd>
+          </div>
+          <div>
+            <dt class="text-neutral-500">Dropped</dt>
+            <dd class="text-neutral-200 text-sm">{bytesDropped} B</dd>
           </div>
         </dl>
       {/if}
@@ -292,8 +440,8 @@
     {/if}
   </section>
 
-  <p class="text-xs text-neutral-500 max-w-lg">
-    Pre-alpha · B3 complete · Next: B4 (DSP worker + waterfall).
+  <p class="text-xs text-neutral-500 max-w-lg text-center">
+    Pre-alpha · B4 complete · Next: B5 (tuning UI: keyboard + dial).
     <br />
     <a
       href="https://github.com/matsvandamme/moshon-sdr/blob/main/AGENTS.md"
