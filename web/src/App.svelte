@@ -504,7 +504,7 @@
 />
 <Onboarding bind:open={onboardingOpen} />
 
-<main class="min-h-full flex flex-col items-center px-4 py-8 gap-6">
+<main class="min-h-full flex flex-col items-center px-3 sm:px-4 py-4 sm:py-8 gap-4 sm:gap-6">
   <header class="text-center">
     <div class="flex items-center gap-3 text-(--color-accent) justify-center">
       <Radio size={32} strokeWidth={1.5} />
@@ -532,13 +532,13 @@
   </header>
 
   <section
-    class="w-full max-w-5xl rounded-lg border border-neutral-800 bg-neutral-950/60 p-5"
+    class="w-full max-w-5xl rounded-lg border border-neutral-800 bg-neutral-950/60 p-3 sm:p-5"
   >
-    <header class="flex items-center justify-between mb-4">
+    <header class="flex items-center justify-between flex-wrap gap-2 mb-4">
       <h2 class="text-sm font-medium text-neutral-300 uppercase tracking-wide">
         RTL-SDR · Spectrum &amp; Waterfall
       </h2>
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-2 flex-wrap">
         <button
           type="button"
           onclick={() => (onboardingOpen = true)}
@@ -557,7 +557,7 @@
           <Keyboard size={12} />
           <span>?</span>
         </button>
-        <span class="font-mono text-xs text-neutral-500">B3..B9 · M2</span>
+        <span class="hidden sm:inline font-mono text-xs text-neutral-500">B3..B9 · M2</span>
       </div>
     </header>
 
@@ -686,8 +686,9 @@
         </div>
       {/if}
 
-      <!-- Audio: volume slider + mute -->
-      <div class="flex items-center gap-3 mb-4 text-xs font-mono">
+      <!-- Audio: volume slider + mute + record. Wraps to a second row on
+           narrow viewports so the slider always gets a sensible width. -->
+      <div class="flex items-center flex-wrap gap-2 sm:gap-3 mb-4 text-xs font-mono">
         <button
           type="button"
           onclick={() => tuning.toggleMute()}
@@ -707,7 +708,7 @@
             <span>Audio</span>
           {/if}
         </button>
-        <label class="flex-1 flex items-center gap-3">
+        <label class="order-3 sm:order-none basis-full sm:basis-auto flex-1 flex items-center gap-3 min-w-0">
           <span class="text-neutral-500 uppercase text-[10px]">Vol</span>
           <input
             type="range"
@@ -895,7 +896,7 @@
   </section>
 
   <p class="text-xs text-neutral-500 max-w-lg text-center">
-    Pre-alpha · B9 complete · Press <kbd class="font-mono text-neutral-300">?</kbd> for shortcuts.
+    v0.1.1 · M2 in flight · Press <kbd class="font-mono text-neutral-300">?</kbd> for shortcuts.
     <br />
     <a
       href="https://github.com/matsvandamme/moshon-sdr/blob/main/AGENTS.md"

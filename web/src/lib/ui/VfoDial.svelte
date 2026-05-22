@@ -52,7 +52,7 @@
 </script>
 
 <div
-  class="relative select-none cursor-ew-resize rounded-md border border-neutral-800 bg-neutral-900 px-4 py-3"
+  class="relative select-none cursor-ew-resize rounded-md border border-neutral-800 bg-neutral-900 px-3 sm:px-4 py-2 sm:py-3 touch-pan-y"
   class:cursor-grabbing={dragging}
   onpointerdown={onPointerDown}
   onpointermove={onPointerMove}
@@ -66,12 +66,13 @@
   tabindex="0"
 >
   <div class="flex items-baseline gap-2 justify-center font-mono">
-    <span class="text-(--color-accent) text-3xl tracking-tight tabular-nums">
+    <span class="text-(--color-accent) text-xl sm:text-3xl tracking-tight tabular-nums">
       {formatHzDigits(centerFreq)}
     </span>
-    <span class="text-neutral-500 text-sm">Hz</span>
+    <span class="text-neutral-500 text-xs sm:text-sm">Hz</span>
   </div>
-  <div class="mt-1 text-center text-xs text-neutral-500 font-mono">
-    drag = ±{formatHz(stepSize)} / px · scroll = ±{formatHz(stepSize)} / tick
+  <div class="mt-1 text-center text-[10px] sm:text-xs text-neutral-500 font-mono">
+    <span class="hidden sm:inline">drag = ±{formatHz(stepSize)} / px · </span>
+    <span class="sm:hidden">drag · </span>scroll = ±{formatHz(stepSize)} / tick
   </div>
 </div>

@@ -93,8 +93,8 @@
           <button
             type="button"
             onclick={() => memoryChannels.remove(c.id)}
-            class="text-neutral-600 hover:text-amber-400 cursor-pointer opacity-0
-                   group-hover:opacity-100 transition-opacity"
+            class="text-neutral-600 hover:text-amber-400 cursor-pointer
+                   opacity-60 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity p-1"
             title="Delete {c.name}"
             aria-label="Delete {c.name}"
           >
