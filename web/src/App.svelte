@@ -45,7 +45,11 @@
   let elapsedMs = $state(0);
   let fftFramesRendered = $state(0);
 
-  let dbMin = $state(-100);
+  // Default range tuned for typical RTL-SDR noise floor (~-75 dBFS) to strong
+  // local broadcast peaks (~-20 dBFS). With this span the noise floor maps to
+  // about t=0.08 on the colormap LUT — visible (dark grey/purple) rather than
+  // bottoming out at pure black, which is what magma/classic show at t=0.
+  let dbMin = $state(-80);
   let dbMax = $state(-20);
   let colormap = $state<ColormapName>('viridis');
 
