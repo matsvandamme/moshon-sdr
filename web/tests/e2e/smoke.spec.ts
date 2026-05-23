@@ -12,7 +12,7 @@ import { test, expect } from '@playwright/test';
 test('page loads and WASM smoke value is 42', async ({ page }) => {
   await page.goto('/');
   // The smoke badge is the most reliable signal that WASM init worked.
-  await expect(page.getByText(/DSP smoke test: 42/)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText(/DSP\s*(smoke test:?\s*)?42/)).toBeVisible({ timeout: 15_000 });
 });
 
 test('first-run onboarding modal can be dismissed', async ({ page }) => {
@@ -25,12 +25,12 @@ test('first-run onboarding modal can be dismissed', async ({ page }) => {
   if (await setup.isVisible({ timeout: 2_000 }).catch(() => false)) {
     await setup.click();
   }
-  await expect(page.getByText(/DSP smoke test/)).toBeVisible();
+  await expect(page.getByText(/DSP\s*(smoke test:?\s*)?42/)).toBeVisible();
 });
 
 test('shortcut help opens with ? and closes with Esc', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByText(/DSP smoke test/)).toBeVisible();
+  await expect(page.getByText(/DSP\s*(smoke test:?\s*)?42/)).toBeVisible();
   // Close any onboarding first so the body has focus.
   await page.keyboard.press('Escape');
   await page.keyboard.press('?');
@@ -42,7 +42,7 @@ test('shortcut help opens with ? and closes with Esc', async ({ page }) => {
 
 test('URL hash drives initial tuning', async ({ page }) => {
   await page.goto('/#f=98700000&m=wfm');
-  await expect(page.getByText(/DSP smoke test/)).toBeVisible();
+  await expect(page.getByText(/DSP\s*(smoke test:?\s*)?42/)).toBeVisible();
   // The hash is the load-time tuning state. The `writeHash` $effect
   // mirrors tuning back to the hash on every change — so if we read
   // it after onMount finishes, it should still contain the values we
@@ -58,7 +58,7 @@ test('URL hash drives initial tuning', async ({ page }) => {
 
 test('input-mode tabs render and are clickable', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByText(/DSP smoke test/)).toBeVisible();
+  await expect(page.getByText(/DSP\s*(smoke test:?\s*)?42/)).toBeVisible();
   // The three input modes live in the connect panel. We don't actually
   // connect (no device) — just verify the tabs are present.
   await expect(page.getByRole('button', { name: /HackRF/i }).first()).toBeVisible();
@@ -71,13 +71,13 @@ test('persisted AGC + de-emphasis state survives reload', async ({ page }) => {
   // Playwright without WebUSB mocks, so instead verify the persisted
   // values stick — that's the contract the toggles act on at startup.
   await page.goto('/');
-  await expect(page.getByText(/DSP smoke test/)).toBeVisible();
+  await expect(page.getByText(/DSP\s*(smoke test:?\s*)?42/)).toBeVisible();
   await page.evaluate(() => {
     localStorage.setItem('moshon.agc.v1', '1');
     localStorage.setItem('moshon.wfmDeemphUs.v1', '75');
   });
   await page.reload();
-  await expect(page.getByText(/DSP smoke test/)).toBeVisible();
+  await expect(page.getByText(/DSP\s*(smoke test:?\s*)?42/)).toBeVisible();
   // After reload, the same keys should still be present and equal.
   const agc = await page.evaluate(() => localStorage.getItem('moshon.agc.v1'));
   const deemph = await page.evaluate(() => localStorage.getItem('moshon.wfmDeemphUs.v1'));

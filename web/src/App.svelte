@@ -43,6 +43,7 @@
   import { AudioPipeline } from './lib/audio/audio-pipeline';
   import { recorder } from './lib/audio/recorder.svelte';
   import { iqRecorder } from './lib/audio/iq-recorder.svelte';
+  import Section from './lib/ui/Section.svelte';
   import { aircraftTracker } from './lib/state/aircraft.svelte';
   import type { AdsbRawFrame } from './lib/dsp/adsb-parser';
   import { readHash, writeHash } from './lib/state/url-hash';
@@ -937,66 +938,99 @@
 />
 <Onboarding bind:open={onboardingOpen} />
 
-<main class="min-h-full flex flex-col items-center px-3 sm:px-4 py-4 sm:py-8 gap-4 sm:gap-6">
-  <header class="text-center">
-    <div class="flex items-center gap-3 text-(--color-accent) justify-center">
-      <Radio size={32} strokeWidth={1.5} />
-      <h1 class="text-3xl font-medium tracking-tight">Moshon SDR</h1>
-    </div>
-    <p class="mt-2 text-neutral-400 max-w-md">
-      A ham's SDR receiver. In your browser. No install.
-    </p>
-    <div
-      class="mt-4 inline-flex items-center gap-2 rounded-md border border-neutral-800 bg-neutral-900 px-3 py-2 font-mono text-xs"
+<div class="h-screen w-screen overflow-hidden flex flex-col bg-neutral-950 text-neutral-200">
+  <!-- Compact top bar — always visible. Brand + DSP/stream status +
+       help / setup. Logout will live here once auth lands. -->
+  <header
+    class="flex items-center gap-3 px-3 py-2 border-b border-neutral-800 bg-neutral-950 shrink-0"
+  >
+    <Radio size={18} class="text-(--color-accent)" strokeWidth={1.75} />
+    <h1 class="text-sm font-medium tracking-tight">Moshon SDR</h1>
+
+    <!-- DSP smoke as a discreet status pill -->
+    <span
+      class="px-2 py-0.5 rounded text-[10px] font-mono border"
+      class:border-emerald-700={wasmStatus === 'ready'}
+      class:text-emerald-400={wasmStatus === 'ready'}
+      class:border-amber-700={wasmStatus === 'error'}
+      class:text-amber-400={wasmStatus === 'error'}
+      class:border-neutral-800={wasmStatus === 'pending'}
+      class:text-neutral-500={wasmStatus === 'pending'}
+      title={wasmStatus === 'ready'
+        ? `DSP smoke test: ${smokeResult}`
+        : wasmStatus === 'error'
+          ? wasmError ?? 'DSP failed'
+          : 'Loading DSP module…'}
     >
-      {#if wasmStatus === 'pending'}
-        <Loader2 size={14} class="animate-spin text-neutral-400" />
-        <span class="text-neutral-400">Loading DSP module…</span>
-      {:else if wasmStatus === 'ready'}
-        <CircleCheck size={14} class="text-emerald-400" />
-        <span class="text-neutral-300">
-          DSP smoke test: <span class="text-(--color-accent)">{smokeResult}</span>
-        </span>
-      {:else}
-        <CircleAlert size={14} class="text-amber-400" />
-        <span class="text-amber-400">DSP failed: {wasmError}</span>
-      {/if}
-    </div>
+      {wasmStatus === 'ready'
+        ? `DSP ${smokeResult}`
+        : wasmStatus === 'pending'
+          ? 'DSP…'
+          : 'DSP fail'}
+    </span>
+
+    {#if rtlStatus !== 'idle'}
+      <span
+        class="px-2 py-0.5 rounded text-[10px] font-mono border"
+        class:bg-emerald-950={rtlStatus === 'streaming'}
+        class:border-emerald-700={rtlStatus === 'streaming'}
+        class:text-emerald-400={rtlStatus === 'streaming'}
+        class:border-amber-700={rtlStatus === 'connecting' ||
+          rtlStatus === 'closing' ||
+          rtlStatus === 'connected'}
+        class:text-amber-300={rtlStatus === 'connecting' ||
+          rtlStatus === 'closing' ||
+          rtlStatus === 'connected'}
+        class:border-rose-700={rtlStatus === 'error'}
+        class:text-rose-400={rtlStatus === 'error'}
+      >
+        {rtlStatus}
+      </span>
+    {/if}
+
+    {#if rtlStatus === 'streaming'}
+      <span class="text-[10px] font-mono text-neutral-500 hidden md:inline">
+        {rateMSps.toFixed(2)} MS/s · {renderFps.toFixed(0)} fps
+      </span>
+    {/if}
+
+    <div class="flex-1"></div>
+
+    <button
+      type="button"
+      onclick={() => (onboardingOpen = true)}
+      class="inline-flex items-center gap-1 rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 px-2 py-1 text-[11px] font-mono cursor-pointer"
+      title="WebUSB setup help"
+    >
+      <HelpCircle size={12} />
+      <span class="hidden sm:inline">Setup</span>
+    </button>
+    <button
+      type="button"
+      onclick={() => (helpOpen = true)}
+      class="inline-flex items-center gap-1 rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 px-2 py-1 text-[11px] font-mono cursor-pointer"
+      title="Keyboard shortcuts (?)"
+    >
+      <Keyboard size={12} />
+      <span class="hidden sm:inline">?</span>
+    </button>
   </header>
 
-  <section
-    class="w-full max-w-5xl rounded-lg border border-neutral-800 bg-neutral-950/60 p-3 sm:p-5"
-  >
-    <header class="flex items-center justify-between flex-wrap gap-2 mb-4">
-      <h2 class="text-sm font-medium text-neutral-300 uppercase tracking-wide">
-        {inputMode === 'hackrf'
-          ? 'HackRF'
-          : inputMode === 'network'
-            ? 'Network'
-            : 'RTL-SDR'} · Spectrum &amp; Waterfall
-      </h2>
-      <div class="flex items-center gap-2 flex-wrap">
-        <button
-          type="button"
-          onclick={() => (onboardingOpen = true)}
-          class="inline-flex items-center gap-1 rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 px-2 py-1 text-xs font-mono cursor-pointer"
-          title="Show WebUSB setup help"
-        >
-          <HelpCircle size={12} />
-          <span>Setup</span>
-        </button>
-        <button
-          type="button"
-          onclick={() => (helpOpen = true)}
-          class="inline-flex items-center gap-1 rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 px-2 py-1 text-xs font-mono cursor-pointer"
-          title="Show keyboard shortcuts (?)"
-        >
-          <Keyboard size={12} />
-          <span>?</span>
-        </button>
-        <span class="hidden sm:inline font-mono text-xs text-neutral-500">B3..B9 · M2</span>
-      </div>
-    </header>
+  <!-- Body: fixed-width left sidebar + flexible main viewport -->
+  <div class="flex flex-1 overflow-hidden">
+    <aside
+      class="w-full md:w-[360px] shrink-0 border-r border-neutral-800 overflow-y-auto bg-neutral-950/60"
+      aria-label="Controls"
+    >
+      <!-- Controls live in the existing inline blocks below. They'll
+           get wrapped in <Section> primitives in phase 1b; for now the
+           original <section> markup is preserved verbatim inside the
+           sidebar so the rewrite ships in safe increments. -->
+      <section class="p-3 sm:p-4">
+    <!-- Inner header removed — Setup / Help / status moved to the top bar. -->
+    <h2 class="text-[11px] font-mono uppercase tracking-wide text-neutral-500 mb-3">
+      {inputMode === 'hackrf' ? 'HackRF' : inputMode === 'network' ? 'Network' : 'RTL-SDR'} controls
+    </h2>
 
     {#if rtlStatus === 'idle'}
       <!-- Input mode picker. RTL-SDR and HackRF are both WebUSB; the
@@ -1110,174 +1144,9 @@
         Waiting for device picker…
       </div>
     {:else if rtlStatus === 'connected' || rtlStatus === 'streaming' || rtlStatus === 'closing'}
-      <!-- VFO dial + mode/bw/gain row -->
-      <div class="mb-4 grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-4 items-end">
-        <VfoDial
-          centerFreq={tuning.centerFreq}
-          stepSize={tuning.stepSize}
-          onChange={(hz) => (tuning.centerFreq = hz)}
-        />
-        <dl class="grid grid-cols-4 lg:grid-cols-1 gap-x-4 gap-y-1 text-xs font-mono">
-          <div class="lg:flex lg:items-baseline lg:gap-2">
-            <dt class="text-neutral-500 uppercase">Mode</dt>
-            <dd class="text-neutral-200">{MODE_INFO[tuning.mode].label}</dd>
-          </div>
-          <div class="lg:flex lg:items-baseline lg:gap-2">
-            <dt class="text-neutral-500 uppercase">BW</dt>
-            <dd class="text-neutral-200">{formatHz(tuning.bandwidth)}</dd>
-          </div>
-          <div class="lg:flex lg:items-baseline lg:gap-2">
-            <dt class="text-neutral-500 uppercase">Step</dt>
-            <dd class="text-neutral-200">{formatHz(tuning.stepSize)}</dd>
-          </div>
-          <div class="lg:flex lg:items-baseline lg:gap-2">
-            <dt class="text-neutral-500 uppercase">Gain</dt>
-            <dd class="text-neutral-200">
-              {#if inputMode === 'hackrf'}
-                {hrfAmpOn ? `+${HACKRF_AMP_DB}` : '–'} / {hrfLnaDb} / {hrfVgaDb} dB
-              {:else}
-                {gainLabel(tuning.gain)}
-              {/if}
-            </dd>
-          </div>
-        </dl>
-      </div>
-
-      {#if sweepOpen}
-        <div class="mb-3">
-          <SweepPanel
-            sampleRate={sampleRate}
-            latestBins={latestBins}
-            onRetune={onSweepRetune}
-            onCancel={closeSweep}
-            onPickFrequency={onSweepPick}
-          />
-          <button
-            type="button"
-            onclick={closeSweep}
-            class="mt-2 text-xs text-neutral-500 hover:text-neutral-200 font-mono cursor-pointer underline decoration-dotted"
-          >
-            ← back to live spectrum
-          </button>
-        </div>
-      {/if}
-
-      <div class="rounded-md overflow-hidden border border-neutral-800 mb-3 bg-black">
-        <SpectrumWaterfall
-          bins={latestBins}
-          centerFreq={tuning.centerFreq}
-          sampleRate={sampleRate}
-          {dbMin}
-          {dbMax}
-          {colormap}
-          stepSize={tuning.stepSize}
-          onTune={onClickToTune}
-        />
-      </div>
-
-      <!-- ADS-B (M2.6) — aircraft list when tuned to 1090 MHz. -->
-      {#if tuning.mode === 'adsb' && rtlStatus === 'streaming'}
-        <div class="mb-3">
-          <AircraftPanel />
-        </div>
-      {/if}
-
-      <!-- LoRa monitor (M2.7) — spectrum-only at EU868. -->
-      {#if tuning.mode === 'lora' && rtlStatus === 'streaming'}
-        <div class="mb-3">
-          <LoraPanel channelDb={signalDb} />
-        </div>
-      {/if}
-
-      <!-- RDS (M2.4) — only relevant in WFM mode. Shows up as soon as the
-           block sync state machine locks; PS / RT fields fill in over a few
-           seconds as the four 0A / 2A address slots come in. -->
-      {#if tuning.mode === 'wfm' && rtlStatus === 'streaming' && (rdsSynced || rdsStereo)}
-        <div
-          class="mb-3 rounded-md border border-neutral-800 bg-neutral-950 p-3 font-mono text-xs"
-          aria-label="RDS"
-        >
-          <div class="flex items-center justify-between mb-1.5 text-neutral-500 uppercase">
-            <span class="flex items-center gap-2">
-              <span>RDS</span>
-              {#if rdsSynced}
-                <span class="text-emerald-400 text-[10px]">locked</span>
-              {:else}
-                <span class="text-neutral-600 text-[10px]">searching…</span>
-              {/if}
-              {#if rdsStereo}
-                <span class="text-(--color-accent) text-[10px]">stereo</span>
-              {/if}
-            </span>
-            {#if rdsSynced && rdsPi > 0}
-              <span class="tabular-nums text-neutral-400">
-                PI 0x{rdsPi.toString(16).toUpperCase().padStart(4, '0')}
-              </span>
-            {/if}
-          </div>
-          {#if rdsSynced}
-            <div class="flex items-baseline gap-2 mb-1">
-              <span class="text-neutral-500 text-[10px] uppercase w-6">PS</span>
-              <span class="text-(--color-accent) text-base tracking-wide">{rdsPs}</span>
-            </div>
-            {#if rdsRt.trim().length > 0}
-              <div class="flex items-start gap-2">
-                <span class="text-neutral-500 text-[10px] uppercase w-6 mt-0.5">RT</span>
-                <span class="text-neutral-300 break-words flex-1">{rdsRt}</span>
-              </div>
-            {/if}
-          {/if}
-        </div>
-      {/if}
-
-      <!-- CW decoder (M2.3) -->
-      {#if tuning.mode === 'cw' && rtlStatus === 'streaming'}
-        <div
-          class="mb-3 rounded-md border border-neutral-800 bg-neutral-950 p-3 font-mono text-xs"
-          aria-label="CW decode"
-        >
-          <div class="flex items-center justify-between mb-1.5 text-neutral-500 uppercase">
-            <span>CW decode</span>
-            <span class="tabular-nums">
-              {cwDecodedWpm > 0 ? `~${cwDecodedWpm.toFixed(0)} WPM` : ''}
-              <button
-                type="button"
-                onclick={() => (cwDecodedText = '')}
-                class="ml-2 text-neutral-600 hover:text-neutral-200 cursor-pointer"
-                title="Clear decoded text"
-              >clear</button>
-            </span>
-          </div>
-          <div
-            class="max-h-24 overflow-y-auto text-(--color-accent) leading-relaxed whitespace-pre-wrap break-words"
-          >
-            {cwDecodedText || '…listening…'}
-          </div>
-        </div>
-      {/if}
-
-      <!-- S-meter (B7) -->
-      {#if rtlStatus === 'streaming' && Number.isFinite(signalDb)}
-        <div
-          class="flex items-center gap-3 mb-4 rounded-md border border-neutral-800
-                 bg-neutral-900 px-3 py-2 font-mono text-xs"
-          aria-label="Signal strength"
-        >
-          <span class="text-neutral-500 uppercase">Signal</span>
-          <span class="text-(--color-accent) text-sm tabular-nums">
-            S{signalS.sNumber}{#if signalS.plus > 0}+{signalS.plus}{/if}
-          </span>
-          <span class="text-neutral-400 tabular-nums">
-            {signalDb.toFixed(1)} dBFS
-          </span>
-          <div class="flex-1 h-1.5 rounded bg-neutral-800 overflow-hidden">
-            <div
-              class="h-full bg-(--color-accent)"
-              style="width: {Math.max(0, Math.min(100, ((signalDb + 100) / 100) * 100))}%"
-            ></div>
-          </div>
-        </div>
-      {/if}
+      <!-- Spectrum/VFO/decode panels live in the main area on the right.
+           This sidebar branch only carries the controls (audio row,
+           gain, advanced, memory, start/stop) below. -->
 
       <!-- Audio: volume slider + mute + record. Wraps to a second row on
            narrow viewports so the slider always gets a sensible width. -->
@@ -1829,16 +1698,196 @@
         Reset
       </button>
     {/if}
-  </section>
 
-  <p class="text-xs text-neutral-500 max-w-lg text-center">
-    v0.1.1 · M2 in flight · Press <kbd class="font-mono text-neutral-300">?</kbd> for shortcuts.
-    <br />
-    <a
-      href="https://github.com/matsvandamme/moshon-sdr/blob/main/AGENTS.md"
-      class="underline decoration-dotted hover:text-(--color-accent)"
-      target="_blank"
-      rel="noreferrer">Roadmap</a
-    >
-  </p>
-</main>
+    <p class="text-[10px] text-neutral-600 px-3 py-3 border-t border-neutral-800">
+      v0.1.1 · Press <kbd class="font-mono text-neutral-400">?</kbd> for shortcuts ·
+      <a
+        href="https://github.com/matsvandamme/moshon-sdr/blob/main/AGENTS.md"
+        class="underline decoration-dotted hover:text-(--color-accent)"
+        target="_blank"
+        rel="noreferrer">Roadmap</a
+      >
+    </p>
+    </section>
+    </aside>
+
+    <!-- Main viewport — visualization + decode panels. -->
+    <main class="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
+      {#if rtlStatus === 'idle'}
+        <div class="flex-1 flex items-center justify-center text-neutral-500 text-sm font-mono">
+          <p>← pick a source and click Connect</p>
+        </div>
+      {:else if rtlStatus === 'connecting'}
+        <div class="flex-1 flex items-center justify-center gap-2 text-neutral-400 text-sm font-mono">
+          <Loader2 size={16} class="animate-spin" />
+          Waiting for device picker…
+        </div>
+      {:else if rtlStatus === 'connected' || rtlStatus === 'streaming' || rtlStatus === 'closing'}
+        <!-- VFO + tuning summary. The dial is the big primary input;
+             the readouts below keep mode / BW / step / gain in sight. -->
+        <div class="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-4 items-end">
+          <VfoDial
+            centerFreq={tuning.centerFreq}
+            stepSize={tuning.stepSize}
+            onChange={(hz) => (tuning.centerFreq = hz)}
+          />
+          <dl class="grid grid-cols-4 lg:grid-cols-1 gap-x-4 gap-y-1 text-xs font-mono">
+            <div class="lg:flex lg:items-baseline lg:gap-2">
+              <dt class="text-neutral-500 uppercase">Mode</dt>
+              <dd class="text-neutral-200">{MODE_INFO[tuning.mode].label}</dd>
+            </div>
+            <div class="lg:flex lg:items-baseline lg:gap-2">
+              <dt class="text-neutral-500 uppercase">BW</dt>
+              <dd class="text-neutral-200">{formatHz(tuning.bandwidth)}</dd>
+            </div>
+            <div class="lg:flex lg:items-baseline lg:gap-2">
+              <dt class="text-neutral-500 uppercase">Step</dt>
+              <dd class="text-neutral-200">{formatHz(tuning.stepSize)}</dd>
+            </div>
+            <div class="lg:flex lg:items-baseline lg:gap-2">
+              <dt class="text-neutral-500 uppercase">Gain</dt>
+              <dd class="text-neutral-200">
+                {#if inputMode === 'hackrf'}
+                  {hrfAmpOn ? `+${HACKRF_AMP_DB}` : '–'} / {hrfLnaDb} / {hrfVgaDb} dB
+                {:else}
+                  {gainLabel(tuning.gain)}
+                {/if}
+              </dd>
+            </div>
+          </dl>
+        </div>
+
+        {#if sweepOpen}
+          <div>
+            <SweepPanel
+              sampleRate={sampleRate}
+              latestBins={latestBins}
+              onRetune={onSweepRetune}
+              onCancel={closeSweep}
+              onPickFrequency={onSweepPick}
+            />
+            <button
+              type="button"
+              onclick={closeSweep}
+              class="mt-2 text-xs text-neutral-500 hover:text-neutral-200 font-mono cursor-pointer underline decoration-dotted"
+            >
+              ← back to live spectrum
+            </button>
+          </div>
+        {/if}
+
+        <div class="rounded-md overflow-hidden border border-neutral-800 bg-black">
+          <SpectrumWaterfall
+            bins={latestBins}
+            centerFreq={tuning.centerFreq}
+            sampleRate={sampleRate}
+            {dbMin}
+            {dbMax}
+            {colormap}
+            stepSize={tuning.stepSize}
+            onTune={onClickToTune}
+          />
+        </div>
+
+        <!-- S-meter -->
+        {#if rtlStatus === 'streaming' && Number.isFinite(signalDb)}
+          <div
+            class="flex items-center gap-3 rounded-md border border-neutral-800 bg-neutral-900 px-3 py-2 font-mono text-xs"
+            aria-label="Signal strength"
+          >
+            <span class="text-neutral-500 uppercase">Signal</span>
+            <span class="text-(--color-accent) text-sm tabular-nums">
+              S{signalS.sNumber}{#if signalS.plus > 0}+{signalS.plus}{/if}
+            </span>
+            <span class="text-neutral-400 tabular-nums">
+              {signalDb.toFixed(1)} dBFS
+            </span>
+            <div class="flex-1 h-1.5 rounded bg-neutral-800 overflow-hidden">
+              <div
+                class="h-full bg-(--color-accent)"
+                style="width: {Math.max(0, Math.min(100, ((signalDb + 100) / 100) * 100))}%"
+              ></div>
+            </div>
+          </div>
+        {/if}
+
+        <!-- Mode-specific decode panels. Each only renders when the
+             corresponding mode is selected AND we have meaningful data. -->
+        {#if tuning.mode === 'adsb' && rtlStatus === 'streaming'}
+          <AircraftPanel />
+        {/if}
+
+        {#if tuning.mode === 'lora' && rtlStatus === 'streaming'}
+          <LoraPanel channelDb={signalDb} />
+        {/if}
+
+        {#if tuning.mode === 'wfm' && rtlStatus === 'streaming' && (rdsSynced || rdsStereo)}
+          <div
+            class="rounded-md border border-neutral-800 bg-neutral-950 p-3 font-mono text-xs"
+            aria-label="RDS"
+          >
+            <div class="flex items-center justify-between mb-1.5 text-neutral-500 uppercase">
+              <span class="flex items-center gap-2">
+                <span>RDS</span>
+                {#if rdsSynced}
+                  <span class="text-emerald-400 text-[10px]">locked</span>
+                {:else}
+                  <span class="text-neutral-600 text-[10px]">searching…</span>
+                {/if}
+                {#if rdsStereo}
+                  <span class="text-(--color-accent) text-[10px]">stereo</span>
+                {/if}
+              </span>
+              {#if rdsSynced && rdsPi > 0}
+                <span class="tabular-nums text-neutral-400">
+                  PI 0x{rdsPi.toString(16).toUpperCase().padStart(4, '0')}
+                </span>
+              {/if}
+            </div>
+            {#if rdsSynced}
+              <div class="flex items-baseline gap-2 mb-1">
+                <span class="text-neutral-500 text-[10px] uppercase w-6">PS</span>
+                <span class="text-(--color-accent) text-base tracking-wide">{rdsPs}</span>
+              </div>
+              {#if rdsRt.trim().length > 0}
+                <div class="flex items-start gap-2">
+                  <span class="text-neutral-500 text-[10px] uppercase w-6 mt-0.5">RT</span>
+                  <span class="text-neutral-300 break-words flex-1">{rdsRt}</span>
+                </div>
+              {/if}
+            {/if}
+          </div>
+        {/if}
+
+        {#if tuning.mode === 'cw' && rtlStatus === 'streaming'}
+          <div
+            class="rounded-md border border-neutral-800 bg-neutral-950 p-3 font-mono text-xs"
+            aria-label="CW decode"
+          >
+            <div class="flex items-center justify-between mb-1.5 text-neutral-500 uppercase">
+              <span>CW decode</span>
+              <span class="tabular-nums">
+                {cwDecodedWpm > 0 ? `~${cwDecodedWpm.toFixed(0)} WPM` : ''}
+                <button
+                  type="button"
+                  onclick={() => (cwDecodedText = '')}
+                  class="ml-2 text-neutral-600 hover:text-neutral-200 cursor-pointer"
+                  title="Clear decoded text"
+                >clear</button>
+              </span>
+            </div>
+            <div
+              class="max-h-24 overflow-y-auto text-(--color-accent) leading-relaxed whitespace-pre-wrap break-words"
+            >
+              {cwDecodedText || '…listening…'}
+            </div>
+          </div>
+        {/if}
+      {:else if rtlStatus === 'error'}
+        <div class="flex-1 flex items-center justify-center text-rose-400 text-sm font-mono">
+          {rtlError}
+        </div>
+      {/if}
+    </main>
+  </div>
+</div>
