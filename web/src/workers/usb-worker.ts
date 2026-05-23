@@ -13,7 +13,11 @@
  */
 
 import { RTL2832U, type RtlDevice, type SampleBlock } from '@jtarrio/webrtlsdr/rtlsdr.js';
+import { DirectSampling } from '@jtarrio/webrtlsdr/rtlsdr.js';
 import { SabRing } from '../lib/ring/sab-ring';
+import { NcoShifter } from '../lib/usb/nco-shift';
+
+export type DirectSamplingMode = 'off' | 'i' | 'q';
 
 type InboundInit = {
   kind: 'init';
@@ -26,15 +30,35 @@ type InboundInit = {
   chunkSamples: number;
   iqRing: SharedArrayBuffer;
   statsIntervalMs: number;
+  /** Software offset-tuning shift in Hz (0 = disabled). The dongle is
+   *  actually tuned to centerFreq + offsetHz; we shift the IQ stream
+   *  back by -offsetHz so the desired signal lands at DC and the DC
+   *  spike sits at +offsetHz, out of the demod's passband. */
+  offsetHz?: number;
+  /** Crystal correction in parts-per-million. */
+  ppmCorrection?: number;
+  /** Enable the SDR's bias-T (powers external LNAs / preamps via the
+   *  coax). RTL-SDR Blog v3+ and similar. */
+  biasT?: boolean;
+  /** Direct-sampling mode: 'off' (normal RF path), 'i' or 'q' (HF via
+   *  the RTL2832 ADC pins, bypassing the tuner — works below ~24 MHz). */
+  directSampling?: DirectSamplingMode;
 };
 type InboundRetune = {
   kind: 'retune';
   centerFreq?: number;
   gain?: number | null;
+  offsetHz?: number;
+};
+type InboundAdvanced = {
+  kind: 'advanced';
+  ppmCorrection?: number;
+  biasT?: boolean;
+  directSampling?: DirectSamplingMode;
 };
 type InboundStop = { kind: 'stop' };
 type InboundClose = { kind: 'close' };
-type Inbound = InboundInit | InboundRetune | InboundStop | InboundClose;
+type Inbound = InboundInit | InboundRetune | InboundAdvanced | InboundStop | InboundClose;
 
 type OutboundStarted = {
   kind: 'started';
@@ -58,6 +82,10 @@ let chunkSize = 65_536;
 let bytesWrittenTotal = 0;
 let statsIntervalMs = 250;
 let statsTimer: ReturnType<typeof setInterval> | null = null;
+let currentSampleRate = 2_400_000;
+let currentDialFreq = 100_000_000;
+let currentOffsetHz = 0;
+const nco = new NcoShifter();
 
 function postOut(msg: Outbound) {
   self.postMessage(msg);
@@ -86,11 +114,33 @@ async function init(opts: InboundInit) {
     bytesWrittenTotal = 0;
     chunkSize = opts.chunkSamples;
     statsIntervalMs = opts.statsIntervalMs;
+    currentSampleRate = opts.sampleRate;
+    currentDialFreq = opts.centerFreq;
+    currentOffsetHz = opts.offsetHz ?? 0;
+    nco.configure(currentOffsetHz, currentSampleRate);
 
     await usbDevice.open();
     device = await RTL2832U.open(usbDevice);
+    // Apply advanced settings BEFORE sample rate / frequency so the
+    // first read isn't on a half-configured device.
+    if (typeof opts.ppmCorrection === 'number') {
+      await device.setFrequencyCorrection(opts.ppmCorrection);
+    }
+    if (opts.directSampling && opts.directSampling !== 'off') {
+      const mode = opts.directSampling === 'i' ? DirectSampling.I : DirectSampling.Q;
+      await device.setDirectSamplingMethod(mode);
+    } else if (opts.directSampling === 'off') {
+      await device.setDirectSamplingMethod(DirectSampling.Off);
+    }
+    if (typeof opts.biasT === 'boolean') {
+      await device.enableBiasTee(opts.biasT);
+    }
     const actualSampleRate = await device.setSampleRate(opts.sampleRate);
-    const actualFrequency = await device.setCenterFrequency(opts.centerFreq);
+    // Offset-tune: tune physical LO above the dial freq by `offsetHz`,
+    // and let the NCO shift bring it back. Skip if direct sampling is on
+    // (the bias-T / DC-spike concerns don't apply there).
+    const physicalFreq = currentDialFreq + currentOffsetHz;
+    const actualFrequency = await device.setCenterFrequency(physicalFreq);
     await device.setGain(opts.gain);
     await device.resetBuffer();
 
@@ -125,6 +175,9 @@ async function readLoop() {
       return;
     }
     const bytes = new Uint8Array(block.data);
+    // Software offset tuning: shift the IQ stream by -offsetHz so the
+    // physical-offset dongle frequency lands at DC in the SAB ring.
+    if (currentOffsetHz !== 0) nco.shiftInPlace(bytes);
     ring.write(bytes);
     bytesWrittenTotal += bytes.length;
   }
@@ -133,11 +186,41 @@ async function readLoop() {
 async function retune(opts: InboundRetune) {
   if (!device) return;
   try {
+    if (typeof opts.offsetHz === 'number' && opts.offsetHz !== currentOffsetHz) {
+      currentOffsetHz = opts.offsetHz;
+      nco.configure(currentOffsetHz, currentSampleRate);
+      // Re-issue the tune so the physical LO follows the new offset.
+      await device.setCenterFrequency(currentDialFreq + currentOffsetHz);
+    }
     if (typeof opts.centerFreq === 'number') {
-      await device.setCenterFrequency(opts.centerFreq);
+      currentDialFreq = opts.centerFreq;
+      await device.setCenterFrequency(currentDialFreq + currentOffsetHz);
     }
     if (opts.gain !== undefined) {
       await device.setGain(opts.gain);
+    }
+  } catch (err) {
+    postOut({ kind: 'error', message: errMessage(err) });
+  }
+}
+
+async function applyAdvanced(opts: InboundAdvanced) {
+  if (!device) return;
+  try {
+    if (typeof opts.ppmCorrection === 'number') {
+      await device.setFrequencyCorrection(opts.ppmCorrection);
+    }
+    if (opts.directSampling !== undefined) {
+      const mode =
+        opts.directSampling === 'i'
+          ? DirectSampling.I
+          : opts.directSampling === 'q'
+            ? DirectSampling.Q
+            : DirectSampling.Off;
+      await device.setDirectSamplingMethod(mode);
+    }
+    if (typeof opts.biasT === 'boolean') {
+      await device.enableBiasTee(opts.biasT);
     }
   } catch (err) {
     postOut({ kind: 'error', message: errMessage(err) });
@@ -184,6 +267,9 @@ self.onmessage = (e: MessageEvent<Inbound>) => {
       break;
     case 'retune':
       void retune(msg);
+      break;
+    case 'advanced':
+      void applyAdvanced(msg);
       break;
     case 'stop':
       void stop();

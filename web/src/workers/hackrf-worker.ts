@@ -15,6 +15,7 @@
  */
 
 import { SabRing } from '../lib/ring/sab-ring';
+import { NcoShifter } from '../lib/usb/nco-shift';
 import {
   HACKRF_DEFAULT_GAIN,
   HRF_MODE,
@@ -44,15 +45,27 @@ type InboundInit = {
   hackrfGain?: HackRfGain;
   iqRing: SharedArrayBuffer;
   statsIntervalMs: number;
+  /** Software offset-tuning shift in Hz (0 = disabled). */
+  offsetHz?: number;
+  /** Power the antenna port (~3.0V/50mA) for external LNAs. */
+  antennaPower?: boolean;
+  /** Override the auto-picked baseband filter bandwidth (Hz). */
+  bbFilterHz?: number;
 };
 type InboundRetune = {
   kind: 'retune';
   centerFreq?: number;
   gain?: number | null;
+  offsetHz?: number;
 };
 type InboundSetStageGain = {
   kind: 'setHackrfGain';
   gain: HackRfGain;
+};
+type InboundAdvanced = {
+  kind: 'advanced';
+  antennaPower?: boolean;
+  bbFilterHz?: number;
 };
 type InboundStop = { kind: 'stop' };
 type InboundClose = { kind: 'close' };
@@ -60,6 +73,7 @@ type Inbound =
   | InboundInit
   | InboundRetune
   | InboundSetStageGain
+  | InboundAdvanced
   | InboundStop
   | InboundClose;
 
@@ -89,6 +103,10 @@ let running = false;
 let bytesWrittenTotal = 0;
 let statsIntervalMs = 250;
 let statsTimer: ReturnType<typeof setInterval> | null = null;
+let currentSampleRate = 2_400_000;
+let currentDialFreq = 100_000_000;
+let currentOffsetHz = 0;
+const nco = new NcoShifter();
 
 function postOut(msg: Outbound) {
   self.postMessage(msg);
@@ -120,6 +138,10 @@ async function init(opts: InboundInit) {
     ring.reset();
     bytesWrittenTotal = 0;
     statsIntervalMs = opts.statsIntervalMs;
+    currentSampleRate = opts.sampleRate;
+    currentDialFreq = opts.centerFreq;
+    currentOffsetHz = opts.offsetHz ?? 0;
+    nco.configure(currentOffsetHz, currentSampleRate);
 
     device = usbDevice;
     await device.open();
@@ -141,11 +163,13 @@ async function init(opts: InboundInit) {
       0,
       packSampleRatePayload(opts.sampleRate),
     );
-    // Baseband filter: pick the next supported value above sampleRate * 0.75.
-    // The list of valid bandwidths is fixed in firmware (1.75, 2.5, 3.5, 5,
-    // 5.5, 6, 7, 8, 9, 10, 12, 14, 15, 20, 24, 28 MHz). 1.75 MHz covers
-    // 2.4 MS/s nicely with anti-alias margin.
-    const bbFilterHz = pickBasebandFilter(opts.sampleRate);
+    // Baseband filter: caller may override; else pick next supported value
+    // above sampleRate * 0.75. Valid widths are fixed in firmware (1.75,
+    // 2.5, 3.5, 5, 5.5, 6, 7, 8, 9, 10, 12, 14, 15, 20, 24, 28 MHz).
+    const bbFilterHz =
+      opts.bbFilterHz && opts.bbFilterHz > 0
+        ? snapToValidBbFilter(opts.bbFilterHz)
+        : pickBasebandFilter(opts.sampleRate);
     await vendorOutNoData(
       device,
       HRF_REQ.BASEBAND_FILTER_BANDWIDTH_SET,
@@ -153,10 +177,14 @@ async function init(opts: InboundInit) {
       (bbFilterHz >>> 16) & 0xffff,
     );
 
-    await applyFrequency(opts.centerFreq);
+    // Offset-tune: physical LO = dial + offset; NCO shifts samples back.
+    await applyFrequency(currentDialFreq + currentOffsetHz);
     const stages = opts.hackrfGain
       ?? (opts.gain === null ? HACKRF_DEFAULT_GAIN : distributeGain(opts.gain));
     await applyStageGain(stages);
+    if (opts.antennaPower) {
+      await vendorOutNoData(device, HRF_REQ.ANTENNA_ENABLE, 1, 0);
+    }
 
     // Start the RX stream.
     await vendorOutNoData(device, HRF_REQ.SET_TRANSCEIVER_MODE, HRF_MODE.RX, 0);
@@ -173,6 +201,17 @@ async function init(opts: InboundInit) {
   } catch (err) {
     postOut({ kind: 'error', message: errMessage(err) });
   }
+}
+
+/** Round up to the nearest valid HackRF baseband filter bandwidth. */
+function snapToValidBbFilter(requested: number): number {
+  const valid = [
+    1_750_000, 2_500_000, 3_500_000, 5_000_000, 5_500_000, 6_000_000,
+    7_000_000, 8_000_000, 9_000_000, 10_000_000, 12_000_000, 14_000_000,
+    15_000_000, 20_000_000, 24_000_000, 28_000_000,
+  ];
+  for (const bw of valid) if (bw >= requested) return bw;
+  return valid[valid.length - 1];
 }
 
 function pickBasebandFilter(sampleRate: number): number {
@@ -240,6 +279,7 @@ async function readLoop() {
     for (let i = 0; i < n; i++) {
       view[i] = src[i] + 128;
     }
+    if (currentOffsetHz !== 0) nco.shiftInPlace(view);
     ring.write(view);
     bytesWrittenTotal += n;
   }
@@ -258,11 +298,37 @@ function emitStats() {
 async function retune(opts: InboundRetune) {
   if (!device) return;
   try {
+    if (typeof opts.offsetHz === 'number' && opts.offsetHz !== currentOffsetHz) {
+      currentOffsetHz = opts.offsetHz;
+      nco.configure(currentOffsetHz, currentSampleRate);
+      await applyFrequency(currentDialFreq + currentOffsetHz);
+    }
     if (typeof opts.centerFreq === 'number') {
-      await applyFrequency(opts.centerFreq);
+      currentDialFreq = opts.centerFreq;
+      await applyFrequency(currentDialFreq + currentOffsetHz);
     }
     if (opts.gain !== undefined) {
       await applyLegacyGain(opts.gain);
+    }
+  } catch (err) {
+    postOut({ kind: 'error', message: errMessage(err) });
+  }
+}
+
+async function applyAdvanced(opts: InboundAdvanced) {
+  if (!device) return;
+  try {
+    if (typeof opts.antennaPower === 'boolean') {
+      await vendorOutNoData(device, HRF_REQ.ANTENNA_ENABLE, opts.antennaPower ? 1 : 0, 0);
+    }
+    if (typeof opts.bbFilterHz === 'number' && opts.bbFilterHz > 0) {
+      const bw = snapToValidBbFilter(opts.bbFilterHz);
+      await vendorOutNoData(
+        device,
+        HRF_REQ.BASEBAND_FILTER_BANDWIDTH_SET,
+        bw & 0xffff,
+        (bw >>> 16) & 0xffff,
+      );
     }
   } catch (err) {
     postOut({ kind: 'error', message: errMessage(err) });
@@ -334,6 +400,9 @@ self.onmessage = (e: MessageEvent<Inbound>) => {
       break;
     case 'setHackrfGain':
       void setStageGain(msg.gain);
+      break;
+    case 'advanced':
+      void applyAdvanced(msg);
       break;
     case 'stop':
       void stop();

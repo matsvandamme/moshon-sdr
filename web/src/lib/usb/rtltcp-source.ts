@@ -31,6 +31,9 @@ export type StreamOptions = {
   bandwidthHz: number;
   fftSize?: number;
   fftRateHz?: number;
+  /** Software offset-tuning shift in Hz. Applied client-side via NCO; the
+   *  remote rtl_tcp server is tuned to centerFreq + offsetHz. */
+  offsetHz?: number;
   audioRing: SharedArrayBuffer;
 };
 
@@ -166,12 +169,13 @@ export class RtlTcpSource {
       sampleRate: opts.sampleRate,
       centerFreq: opts.centerFreq,
       gain: opts.gain,
+      offsetHz: opts.offsetHz ?? 0,
     });
 
     return startPromise;
   }
 
-  retune(opts: { centerFreq?: number; gain?: number | null }): void {
+  retune(opts: { centerFreq?: number; gain?: number | null; offsetHz?: number }): void {
     if (!this.netWorker) return;
     this.netWorker.postMessage({ kind: 'retune', ...opts });
   }

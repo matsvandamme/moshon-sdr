@@ -33,6 +33,12 @@ export type StreamOptions = {
   bandwidthHz: number;
   fftSize?: number;
   fftRateHz?: number;
+  /** Software offset-tuning shift in Hz. */
+  offsetHz?: number;
+  /** Power the antenna port (~3.0 V/50 mA) for external LNAs. */
+  antennaPower?: boolean;
+  /** Override the auto-picked baseband filter bandwidth (Hz). */
+  bbFilterHz?: number;
   audioRing: SharedArrayBuffer;
 };
 
@@ -145,14 +151,23 @@ export class HackRfSource {
       hackrfGain: opts.hackrfGain,
       iqRing: this.ring.buffer,
       statsIntervalMs: STATS_INTERVAL_MS,
+      offsetHz: opts.offsetHz ?? 0,
+      antennaPower: opts.antennaPower,
+      bbFilterHz: opts.bbFilterHz,
     });
 
     return startPromise;
   }
 
-  retune(opts: { centerFreq?: number; gain?: number | null }): void {
+  retune(opts: { centerFreq?: number; gain?: number | null; offsetHz?: number }): void {
     if (!this.hrfWorker) return;
     this.hrfWorker.postMessage({ kind: 'retune', ...opts });
+  }
+
+  /** Push advanced settings (antenna power, baseband filter) live. */
+  setAdvanced(opts: { antennaPower?: boolean; bbFilterHz?: number }): void {
+    if (!this.hrfWorker) return;
+    this.hrfWorker.postMessage({ kind: 'advanced', ...opts });
   }
 
   setMode(mode: DemodMode, bandwidthHz: number): void {

@@ -76,6 +76,16 @@
   let hrfLnaDb = $state(HACKRF_DEFAULT_GAIN.lnaDb);
   let hrfVgaDb = $state(HACKRF_DEFAULT_GAIN.vgaDb);
 
+  // Advanced device settings, applicable across sources. Each is persisted
+  // separately in localStorage.
+  let advOpen = $state(false);
+  let offsetEnabled = $state(false);
+  let offsetHz = $state(250_000);
+  let ppmCorrection = $state(0);
+  let rtlBiasT = $state(false);
+  let rtlDirectSampling = $state<'off' | 'i' | 'q'>('off');
+  let hrfAntennaPower = $state(false);
+
   function activeSource(): RtlSdrSource | HackRfSource | RtlTcpSource {
     if (inputMode === 'hackrf') return hackrfSource;
     if (inputMode === 'network') return netSource;
@@ -149,6 +159,18 @@
         if (typeof parsed.lnaDb === 'number') hrfLnaDb = parsed.lnaDb;
         if (typeof parsed.vgaDb === 'number') hrfVgaDb = parsed.vgaDb;
       }
+      const savedAdv = localStorage.getItem('moshon.advanced.v1');
+      if (savedAdv) {
+        const a = JSON.parse(savedAdv) as Record<string, unknown>;
+        if (typeof a.offsetEnabled === 'boolean') offsetEnabled = a.offsetEnabled;
+        if (typeof a.offsetHz === 'number') offsetHz = a.offsetHz;
+        if (typeof a.ppmCorrection === 'number') ppmCorrection = a.ppmCorrection;
+        if (typeof a.rtlBiasT === 'boolean') rtlBiasT = a.rtlBiasT;
+        if (a.rtlDirectSampling === 'off' || a.rtlDirectSampling === 'i' || a.rtlDirectSampling === 'q') {
+          rtlDirectSampling = a.rtlDirectSampling;
+        }
+        if (typeof a.hrfAntennaPower === 'boolean') hrfAntennaPower = a.hrfAntennaPower;
+      }
     } catch {
       // localStorage unavailable — skip onboarding entirely rather than
       // forcing it on every load.
@@ -197,6 +219,46 @@
       localStorage.setItem('moshon.inputMode.v1', mode);
     } catch {
       // ignore
+    }
+  });
+
+  // Persist advanced settings + apply live to whichever source is active.
+  $effect(() => {
+    const oe = offsetEnabled;
+    const oh = offsetHz;
+    const ppm = ppmCorrection;
+    const bt = rtlBiasT;
+    const ds = rtlDirectSampling;
+    const ap = hrfAntennaPower;
+    try {
+      localStorage.setItem(
+        'moshon.advanced.v1',
+        JSON.stringify({
+          offsetEnabled: oe,
+          offsetHz: oh,
+          ppmCorrection: ppm,
+          rtlBiasT: bt,
+          rtlDirectSampling: ds,
+          hrfAntennaPower: ap,
+        }),
+      );
+    } catch {
+      // ignore
+    }
+    // Live-apply when streaming. The offset retune path is identical
+    // across all three sources.
+    if (rtlStatus === 'streaming') {
+      const off = oe ? oh : 0;
+      activeSource().retune({ offsetHz: off });
+      if (inputMode === 'usb') {
+        usbSource.setAdvanced({
+          ppmCorrection: ppm,
+          biasT: bt,
+          directSampling: ds,
+        });
+      } else if (inputMode === 'hackrf') {
+        hackrfSource.setAdvanced({ antennaPower: ap });
+      }
     }
   });
 
@@ -448,15 +510,22 @@
         fftRateHz: FFT_RATE_HZ,
         mode: tuning.mode,
         bandwidthHz: tuning.bandwidth,
+        offsetHz: offsetEnabled ? offsetHz : 0,
         audioRing: audio.ring!.buffer,
       };
       if (inputMode === 'hackrf') {
         await hackrfSource.start({
           ...baseOpts,
           hackrfGain: { ampOn: hrfAmpOn, lnaDb: hrfLnaDb, vgaDb: hrfVgaDb },
+          antennaPower: hrfAntennaPower,
         });
       } else {
-        await usbSource.start(baseOpts);
+        await usbSource.start({
+          ...baseOpts,
+          ppmCorrection,
+          biasT: rtlBiasT,
+          directSampling: rtlDirectSampling,
+        });
       }
     } catch (err) {
       rtlStatus = 'error';
@@ -483,6 +552,7 @@
         fftRateHz: FFT_RATE_HZ,
         mode: tuning.mode,
         bandwidthHz: tuning.bandwidth,
+        offsetHz: offsetEnabled ? offsetHz : 0,
         audioRing: audio.ring!.buffer,
       });
       rtlStatus = 'streaming';
@@ -1044,6 +1114,103 @@
           />
         </label>
       </div>
+
+      <!-- Advanced device settings (collapsible). Always available, but
+           the source-specific rows hide for inputs that don't support
+           them (RTL-SDR has bias-T / PPM / direct sampling; HackRF has
+           antenna power; network rtl_tcp has only offset tuning). -->
+      <details
+        bind:open={advOpen}
+        class="mb-4 rounded-md border border-neutral-800 bg-neutral-900 text-xs font-mono"
+      >
+        <summary class="cursor-pointer select-none px-3 py-2 text-neutral-400 uppercase hover:text-neutral-200">
+          Advanced
+        </summary>
+        <div class="p-3 border-t border-neutral-800 space-y-3">
+          <!-- Offset tuning (universal). -->
+          <div>
+            <label class="flex items-center gap-2 mb-1.5">
+              <input type="checkbox" bind:checked={offsetEnabled} />
+              <span class="text-neutral-300 uppercase">Offset tuning</span>
+              <span class="text-neutral-600 normal-case">
+                physical LO = dial + offset; NCO shifts back. DC spike moves off-channel.
+              </span>
+            </label>
+            <label class="flex items-center gap-3 ml-6" class:opacity-50={!offsetEnabled}>
+              <span class="text-neutral-500 uppercase text-[10px] w-12">Offset</span>
+              <input
+                type="range"
+                min="50000"
+                max="500000"
+                step="10000"
+                bind:value={offsetHz}
+                disabled={!offsetEnabled}
+                class="flex-1"
+              />
+              <span class="text-(--color-accent) w-16 text-right tabular-nums">
+                {(offsetHz / 1000).toFixed(0)} kHz
+              </span>
+            </label>
+          </div>
+
+          {#if inputMode === 'usb'}
+            <div class="border-t border-neutral-800 pt-3 space-y-2">
+              <div class="text-neutral-500 uppercase mb-1">RTL-SDR</div>
+
+              <label class="flex items-center gap-3">
+                <span class="text-neutral-500 uppercase text-[10px] w-12">PPM</span>
+                <input
+                  type="range"
+                  min="-200"
+                  max="200"
+                  step="1"
+                  bind:value={ppmCorrection}
+                  class="flex-1"
+                />
+                <span class="text-(--color-accent) w-16 text-right tabular-nums">
+                  {ppmCorrection > 0 ? '+' : ''}{ppmCorrection}
+                </span>
+              </label>
+
+              <label class="flex items-center gap-2">
+                <input type="checkbox" bind:checked={rtlBiasT} />
+                <span class="text-neutral-300">Bias-T</span>
+                <span class="text-neutral-600 text-[10px]">
+                  powers external LNAs via coax (~4.5 V/100 mA on RTL-SDR Blog)
+                </span>
+              </label>
+
+              <label class="flex items-center gap-3">
+                <span class="text-neutral-500 uppercase text-[10px] w-12">Direct</span>
+                <select
+                  bind:value={rtlDirectSampling}
+                  class="rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-neutral-200"
+                >
+                  <option value="off">Off (normal RF path)</option>
+                  <option value="i">I branch (HF below 24 MHz)</option>
+                  <option value="q">Q branch (HF below 24 MHz)</option>
+                </select>
+                <span class="text-neutral-600 text-[10px]">
+                  bypasses the tuner — pick I or Q based on board, leave Off otherwise
+                </span>
+              </label>
+            </div>
+          {/if}
+
+          {#if inputMode === 'hackrf'}
+            <div class="border-t border-neutral-800 pt-3 space-y-2">
+              <div class="text-neutral-500 uppercase mb-1">HackRF</div>
+              <label class="flex items-center gap-2">
+                <input type="checkbox" bind:checked={hrfAntennaPower} />
+                <span class="text-neutral-300">Antenna power</span>
+                <span class="text-neutral-600 text-[10px]">
+                  ~3.0 V/50 mA on the antenna port for active antennas / LNAs
+                </span>
+              </label>
+            </div>
+          {/if}
+        </div>
+      </details>
 
       <!-- HackRF gain stages (M2.5b). Three independent controls per the
            official docs. Start values are RF=off, IF=16, BB=16; adjust

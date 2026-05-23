@@ -9,6 +9,7 @@
  */
 
 import { SabRing } from '../lib/ring/sab-ring';
+import { NcoShifter } from '../lib/usb/nco-shift';
 
 type InboundInit = {
   kind: 'init';
@@ -18,8 +19,15 @@ type InboundInit = {
   sampleRate: number;
   centerFreq: number;
   gain: number | null;
+  /** Software offset-tuning shift in Hz. */
+  offsetHz?: number;
 };
-type InboundRetune = { kind: 'retune'; centerFreq?: number; gain?: number | null };
+type InboundRetune = {
+  kind: 'retune';
+  centerFreq?: number;
+  gain?: number | null;
+  offsetHz?: number;
+};
 type InboundStop = { kind: 'stop' };
 type Inbound = InboundInit | InboundRetune | InboundStop;
 
@@ -56,6 +64,10 @@ let bytesWritten = 0;
 let bytesDropped = 0;
 let lastStatsAt = 0;
 let pendingHeader: Uint8Array | null = null;
+let currentSampleRate = 2_400_000;
+let currentDialFreq = 100_000_000;
+let currentOffsetHz = 0;
+const nco = new NcoShifter();
 
 function postOut(msg: Outbound) {
   self.postMessage(msg);
@@ -121,6 +133,10 @@ async function setup(opts: InboundInit): Promise<void> {
   bytesWritten = 0;
   bytesDropped = 0;
   pendingHeader = null;
+  currentSampleRate = opts.sampleRate;
+  currentDialFreq = opts.centerFreq;
+  currentOffsetHz = opts.offsetHz ?? 0;
+  nco.configure(currentOffsetHz, currentSampleRate);
   let headerParsed = false;
 
   ws = new WebSocket(opts.url);
@@ -129,7 +145,8 @@ async function setup(opts: InboundInit): Promise<void> {
   ws.onopen = () => {
     // Tell rtl_tcp what we want. Order matters: sample rate first, then freq.
     sendCommand(CMD_SET_SAMPLE_RATE, opts.sampleRate);
-    applyTuning(opts.centerFreq, opts.gain);
+    // Tune physical LO to dial + offset; NCO shifts samples back.
+    applyTuning(currentDialFreq + currentOffsetHz, opts.gain);
     running = true;
   };
 
@@ -147,10 +164,20 @@ async function setup(opts: InboundInit): Promise<void> {
     } else {
       payload = initial;
     }
-    const written = ring.write(payload);
+    // Make a writable copy so the NCO shift can mutate the bytes in place
+    // (the original ArrayBuffer is owned by the WS message and shouldn't
+    // be mutated). Skipped when offset is zero — keeps the hot path free.
+    let toWrite: Uint8Array;
+    if (currentOffsetHz !== 0) {
+      toWrite = new Uint8Array(payload);
+      nco.shiftInPlace(toWrite);
+    } else {
+      toWrite = payload;
+    }
+    const written = ring.write(toWrite);
     bytesWritten += written;
-    if (written < payload.length) {
-      bytesDropped += payload.length - written;
+    if (written < toWrite.length) {
+      bytesDropped += toWrite.length - written;
     }
     maybePostStats();
   };
@@ -194,7 +221,15 @@ self.onmessage = (e: MessageEvent<Inbound>) => {
       void setup(msg);
       break;
     case 'retune':
-      applyTuning(msg.centerFreq, msg.gain);
+      if (typeof msg.offsetHz === 'number' && msg.offsetHz !== currentOffsetHz) {
+        currentOffsetHz = msg.offsetHz;
+        nco.configure(currentOffsetHz, currentSampleRate);
+      }
+      if (typeof msg.centerFreq === 'number') {
+        currentDialFreq = msg.centerFreq;
+      }
+      // Physical LO chases dial + offset.
+      applyTuning(currentDialFreq + currentOffsetHz, msg.gain);
       break;
     case 'stop':
       shutdown();

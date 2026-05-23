@@ -43,6 +43,14 @@ export type StreamOptions = {
   mode: DemodMode;
   /** Channel filter bandwidth in Hz (used by NFM/AM, ignored by WFM). */
   bandwidthHz: number;
+  /** Software offset-tuning shift in Hz. Physical LO = centerFreq + offsetHz. */
+  offsetHz?: number;
+  /** Crystal correction in PPM. */
+  ppmCorrection?: number;
+  /** Bias-T toggle (powers external LNAs through the coax). */
+  biasT?: boolean;
+  /** Direct-sampling mode for HF reception below ~24 MHz. */
+  directSampling?: 'off' | 'i' | 'q';
   /**
    * SharedArrayBuffer the DSP worker writes 48 kHz mono f32 PCM into,
    * to be consumed by an AudioWorklet on the main thread.
@@ -199,6 +207,10 @@ export class RtlSdrSource {
       chunkSamples: DEFAULT_CHUNK_SAMPLES,
       iqRing: this.ring.buffer,
       statsIntervalMs: STATS_INTERVAL_MS,
+      offsetHz: opts.offsetHz ?? 0,
+      ppmCorrection: opts.ppmCorrection,
+      biasT: opts.biasT,
+      directSampling: opts.directSampling,
     });
 
     return startPromise;
@@ -209,12 +221,25 @@ export class RtlSdrSource {
    * mutable parameters. Safe to call rapidly (e.g. from a drag handler) —
    * the worker queues them in postMessage order.
    */
-  retune(opts: { centerFreq?: number; gain?: number | null }): void {
+  retune(opts: { centerFreq?: number; gain?: number | null; offsetHz?: number }): void {
     if (!this.usbWorker) return;
     this.usbWorker.postMessage({
       kind: 'retune',
       ...opts,
     });
+  }
+
+  /**
+   * Push advanced device settings (PPM, bias-T, direct sampling) to the
+   * USB worker without restarting the stream.
+   */
+  setAdvanced(opts: {
+    ppmCorrection?: number;
+    biasT?: boolean;
+    directSampling?: 'off' | 'i' | 'q';
+  }): void {
+    if (!this.usbWorker) return;
+    this.usbWorker.postMessage({ kind: 'advanced', ...opts });
   }
 
   /**
