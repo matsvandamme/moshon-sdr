@@ -57,6 +57,8 @@ export type StreamOptions = {
   /** Initial squelch threshold (dBFS) for NFM / AM. Pass ≤ -120 to
    *  disable. Default disabled. */
   squelchDb?: number;
+  /** Audio AGC on at startup. Default off. */
+  agcOn?: boolean;
   /**
    * SharedArrayBuffer the DSP worker writes 48 kHz mono f32 PCM into,
    * to be consumed by an AudioWorklet on the main thread.
@@ -209,6 +211,7 @@ export class RtlSdrSource {
       sampleRate: opts.sampleRate,
       deemphasisUs: opts.deemphasisUs,
       squelchDb: opts.squelchDb,
+      agcOn: opts.agcOn,
     });
 
     this.usbWorker!.postMessage({
@@ -290,6 +293,12 @@ export class RtlSdrSource {
   setSquelch(db: number): void {
     if (!this.dspWorker) return;
     this.dspWorker.postMessage({ kind: 'setSquelch', db });
+  }
+
+  /** Toggle the post-demod audio AGC. */
+  setAgc(on: boolean): void {
+    if (!this.dspWorker) return;
+    this.dspWorker.postMessage({ kind: 'setAgc', on });
   }
 
   /** Stops streaming. Device remains permitted but the workers shut down. */

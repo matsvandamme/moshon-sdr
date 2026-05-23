@@ -140,6 +140,10 @@
   let squelchDb = $state(-40);
   let squelchOpen = $state(true);
 
+  // Audio AGC: post-demod loudness normalisation. Off by default so the
+  // user gets the honest signal; can be toggled live without restart.
+  let agcOn = $state(false);
+
   let hrfInfo = $state<{
     boardName: string;
     firmwareVersion: string;
@@ -270,6 +274,8 @@
           // ignore malformed JSON
         }
       }
+      const savedAgc = localStorage.getItem('moshon.agc.v1');
+      if (savedAgc === '1') agcOn = true;
     } catch {
       // localStorage unavailable — skip onboarding entirely rather than
       // forcing it on every load.
@@ -389,6 +395,19 @@
     }
     if (rtlStatus === 'streaming') {
       activeSource().setSquelch(enabled ? db : -120);
+    }
+  });
+
+  // Persist + push audio AGC.
+  $effect(() => {
+    const on = agcOn;
+    try {
+      localStorage.setItem('moshon.agc.v1', on ? '1' : '0');
+    } catch {
+      // ignore
+    }
+    if (rtlStatus === 'streaming') {
+      activeSource().setAgc(on);
     }
   });
 
@@ -648,6 +667,7 @@
         offsetHz: offsetEnabled ? offsetHz : 0,
         deemphasisUs: wfmDeemphUs,
         squelchDb: squelchEnabled ? squelchDb : -120,
+        agcOn,
         audioRing: audio.ring!.buffer,
       };
       if (inputMode === 'hackrf') {
@@ -692,6 +712,7 @@
         offsetHz: offsetEnabled ? offsetHz : 0,
         deemphasisUs: wfmDeemphUs,
         squelchDb: squelchEnabled ? squelchDb : -120,
+        agcOn,
         audioRing: audio.ring!.buffer,
       });
       rtlStatus = 'streaming';
@@ -1252,6 +1273,21 @@
             <span>Audio</span>
           {/if}
         </button>
+        <!-- AGC: levels station-to-station loudness. Works for any
+             demod. Off by default; toggle persists across reloads. -->
+        <button
+          type="button"
+          onclick={() => (agcOn = !agcOn)}
+          class="inline-flex items-center rounded border px-2 py-1 text-[10px] uppercase cursor-pointer"
+          class:bg-(--color-accent)={agcOn}
+          class:text-neutral-950={agcOn}
+          class:border-(--color-accent)={agcOn}
+          class:text-neutral-400={!agcOn}
+          class:border-neutral-700={!agcOn}
+          aria-pressed={agcOn}
+          title="Auto level audio output"
+        >AGC</button>
+
         <label class="order-3 sm:order-none basis-full sm:basis-auto flex-1 flex items-center gap-3 min-w-0">
           <span class="text-neutral-500 uppercase text-[10px]">Vol</span>
           <input

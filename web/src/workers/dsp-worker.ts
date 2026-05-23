@@ -46,19 +46,23 @@ type InboundInit = {
   /** Initial squelch threshold (dBFS) for NFM / AM. Pass -120 (or
    *  omit) to disable. */
   squelchDb?: number;
+  /** Audio AGC on at startup. Default off. */
+  agcOn?: boolean;
 };
 type InboundSetMode = { kind: 'setMode'; mode: DemodMode; bandwidthHz: number };
 type InboundStop = { kind: 'stop' };
 type InboundSetRecording = { kind: 'setRecording'; on: boolean };
 type InboundSetDeemphasis = { kind: 'setDeemphasis'; us: number };
 type InboundSetSquelch = { kind: 'setSquelch'; db: number };
+type InboundSetAgc = { kind: 'setAgc'; on: boolean };
 type Inbound =
   | InboundInit
   | InboundSetMode
   | InboundStop
   | InboundSetRecording
   | InboundSetDeemphasis
-  | InboundSetSquelch;
+  | InboundSetSquelch
+  | InboundSetAgc;
 
 type OutboundReady = { kind: 'ready' };
 type OutboundFft = { kind: 'fft'; bins: Float32Array; time: number };
@@ -121,6 +125,63 @@ function softLimitInPlace(buf: Float32Array): void {
     buf[i] = s * (LIMIT_KNEE + LIMIT_HEADROOM * Math.tanh(over));
   }
 }
+
+/** Simple feed-forward AGC keyed off the mid-channel RMS. Levels
+ *  inter-station volume so one user doesn't have to keep riding the
+ *  volume slider. Asymmetric attack / release: gain comes DOWN fast on
+ *  a loud signal, but goes UP slowly so quiet passages aren't pumped.
+ *  Off by default; the limiter still catches whatever the AGC misses. */
+class AudioAgc {
+  enabled = false;
+  private rmsSq = 1e-4;
+  private gain = 1.0;
+  /** Target RMS post-AGC. ≈ -12 dBFS leaves comfortable headroom above
+   *  the limiter knee. */
+  private static readonly TARGET = 0.25;
+  private static readonly MIN_GAIN = 0.5;
+  private static readonly MAX_GAIN = 8.0;
+  /** RMS smoothing: ~30 ms at 48 kHz so syllables don't trigger fast
+   *  swings. α = exp(-1/(0.030 × 48000)). */
+  private static readonly RMS_ALPHA = 0.9993;
+  /** Gain-down (attack) smoothing: ~5 ms. */
+  private static readonly ATTACK_ALPHA = 0.996;
+  /** Gain-up (release) smoothing: ~500 ms. */
+  private static readonly RELEASE_ALPHA = 0.99996;
+
+  setEnabled(on: boolean): void {
+    this.enabled = on;
+    if (!on) {
+      this.gain = 1.0;
+      this.rmsSq = 1e-4;
+    }
+  }
+
+  /** Apply AGC to an interleaved stereo Float32Array in place. */
+  applyInPlace(stereo: Float32Array): void {
+    if (!this.enabled) return;
+    const n = stereo.length;
+    let rmsSq = this.rmsSq;
+    let gain = this.gain;
+    for (let i = 0; i < n; i += 2) {
+      const l = stereo[i];
+      const r = stereo[i + 1];
+      const mid = (l + r) * 0.5;
+      rmsSq = AudioAgc.RMS_ALPHA * rmsSq + (1 - AudioAgc.RMS_ALPHA) * (mid * mid);
+      const rms = Math.sqrt(rmsSq);
+      let target = AudioAgc.TARGET / Math.max(rms, 1e-5);
+      if (target < AudioAgc.MIN_GAIN) target = AudioAgc.MIN_GAIN;
+      else if (target > AudioAgc.MAX_GAIN) target = AudioAgc.MAX_GAIN;
+      const alpha = target < gain ? AudioAgc.ATTACK_ALPHA : AudioAgc.RELEASE_ALPHA;
+      gain = alpha * gain + (1 - alpha) * target;
+      stereo[i] = l * gain;
+      stereo[i + 1] = r * gain;
+    }
+    this.rmsSq = rmsSq;
+    this.gain = gain;
+  }
+}
+
+const audioAgc = new AudioAgc();
 
 let iqRing: SabRing | null = null;
 let audioRing: SabRing | null = null;
@@ -330,6 +391,9 @@ async function setup(opts: InboundInit) {
     if (typeof opts.squelchDb === 'number') {
       currentSquelchDb = opts.squelchDb;
     }
+    if (typeof opts.agcOn === 'boolean') {
+      audioAgc.setEnabled(opts.agcOn);
+    }
     fft = new FftContext(opts.fftSize);
     rebuildDemod(opts.mode, opts.bandwidthHz);
     iqRing = new SabRing(opts.iqRing);
@@ -434,6 +498,7 @@ async function processLoop() {
     if (audio.length > 0) {
       const stereo =
         currentMode === 'wfm' ? audio : monoToInterleavedStereo(audio);
+      audioAgc.applyInPlace(stereo);
       softLimitInPlace(stereo);
       const bytes = new Uint8Array(stereo.buffer, stereo.byteOffset, stereo.byteLength);
       audioRing.write(bytes);
@@ -457,6 +522,7 @@ async function processLoop() {
         if (audioMore.length > 0) {
           const stereoMore =
             currentMode === 'wfm' ? audioMore : monoToInterleavedStereo(audioMore);
+          audioAgc.applyInPlace(stereoMore);
           softLimitInPlace(stereoMore);
           const moreBytes = new Uint8Array(
             stereoMore.buffer,
@@ -511,6 +577,9 @@ self.onmessage = (e: MessageEvent<Inbound>) => {
         if (nfmDemodRef) nfmDemodRef.set_squelch_db(msg.db);
         if (amDemodRef) amDemodRef.set_squelch_db(msg.db);
       }
+      break;
+    case 'setAgc':
+      audioAgc.setEnabled(msg.on);
       break;
     case 'stop':
       running = false;

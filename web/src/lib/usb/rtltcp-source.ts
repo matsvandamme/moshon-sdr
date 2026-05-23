@@ -38,6 +38,8 @@ export type StreamOptions = {
   deemphasisUs?: number;
   /** Initial squelch threshold (dBFS) for NFM / AM. ≤ -120 disables. */
   squelchDb?: number;
+  /** Audio AGC on at startup. */
+  agcOn?: boolean;
   audioRing: SharedArrayBuffer;
 };
 
@@ -173,6 +175,7 @@ export class RtlTcpSource {
       sampleRate: opts.sampleRate,
       deemphasisUs: opts.deemphasisUs,
       squelchDb: opts.squelchDb,
+      agcOn: opts.agcOn,
     });
 
     this.netWorker!.postMessage({
@@ -213,6 +216,12 @@ export class RtlTcpSource {
   setSquelch(db: number): void {
     if (!this.dspWorker) return;
     this.dspWorker.postMessage({ kind: 'setSquelch', db });
+  }
+
+  /** Toggle the post-demod audio AGC. */
+  setAgc(on: boolean): void {
+    if (!this.dspWorker) return;
+    this.dspWorker.postMessage({ kind: 'setAgc', on });
   }
 
   async stop(): Promise<void> {
