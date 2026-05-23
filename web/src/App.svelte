@@ -128,6 +128,11 @@
   let rtlDirectSampling = $state<'off' | 'i' | 'q'>('off');
   let hrfAntennaPower = $state(false);
 
+  // WFM audio de-emphasis time constant. 50 µs is the ITU R1 / Europe
+  // standard; 75 µs is the FCC standard for the Americas and Japan.
+  // Setting the wrong region makes the high-end either harsh or muddy.
+  let wfmDeemphUs = $state<50 | 75>(50);
+
   let hrfInfo = $state<{
     boardName: string;
     firmwareVersion: string;
@@ -243,6 +248,10 @@
         }
         if (typeof a.hrfAntennaPower === 'boolean') hrfAntennaPower = a.hrfAntennaPower;
       }
+      const savedDeemph = localStorage.getItem('moshon.wfmDeemphUs.v1');
+      if (savedDeemph === '50' || savedDeemph === '75') {
+        wfmDeemphUs = Number(savedDeemph) as 50 | 75;
+      }
     } catch {
       // localStorage unavailable — skip onboarding entirely rather than
       // forcing it on every load.
@@ -331,6 +340,22 @@
       } else if (inputMode === 'hackrf') {
         hackrfSource.setAdvanced({ antennaPower: ap });
       }
+    }
+  });
+
+  // Persist + push WFM de-emphasis. Applies live to whichever source is
+  // currently streaming; the source forwards the setDeemphasis message to
+  // the DSP worker, which applies it to the running WfmDemod (no audio
+  // glitch — the IIR state is preserved across the coefficient swap).
+  $effect(() => {
+    const us = wfmDeemphUs;
+    try {
+      localStorage.setItem('moshon.wfmDeemphUs.v1', String(us));
+    } catch {
+      // ignore
+    }
+    if (rtlStatus === 'streaming') {
+      activeSource().setDeemphasis(us);
     }
   });
 
@@ -583,6 +608,7 @@
         mode: tuning.mode,
         bandwidthHz: tuning.bandwidth,
         offsetHz: offsetEnabled ? offsetHz : 0,
+        deemphasisUs: wfmDeemphUs,
         audioRing: audio.ring!.buffer,
       };
       if (inputMode === 'hackrf') {
@@ -625,6 +651,7 @@
         mode: tuning.mode,
         bandwidthHz: tuning.bandwidth,
         offsetHz: offsetEnabled ? offsetHz : 0,
+        deemphasisUs: wfmDeemphUs,
         audioRing: audio.ring!.buffer,
       });
       rtlStatus = 'streaming';
@@ -1199,6 +1226,38 @@
             {Math.round(volume * 100)}%
           </span>
         </label>
+
+        <!-- WFM de-emphasis (mode-conditional). Europe is 50 µs, Americas
+             is 75 µs. Live-applied to the running demod — no glitch. -->
+        {#if tuning.mode === 'wfm'}
+          <div
+            class="inline-flex items-center gap-1 rounded border border-neutral-700 px-2 py-1"
+            title="WFM audio de-emphasis time constant"
+            aria-label="WFM de-emphasis"
+          >
+            <span class="text-neutral-500 uppercase text-[10px] mr-1">De-emph</span>
+            <button
+              type="button"
+              onclick={() => (wfmDeemphUs = 50)}
+              class="px-1.5 rounded text-[10px] cursor-pointer"
+              class:bg-(--color-accent)={wfmDeemphUs === 50}
+              class:text-neutral-950={wfmDeemphUs === 50}
+              class:text-neutral-400={wfmDeemphUs !== 50}
+              aria-pressed={wfmDeemphUs === 50}
+              title="ITU R1 / Europe"
+            >50µs</button>
+            <button
+              type="button"
+              onclick={() => (wfmDeemphUs = 75)}
+              class="px-1.5 rounded text-[10px] cursor-pointer"
+              class:bg-(--color-accent)={wfmDeemphUs === 75}
+              class:text-neutral-950={wfmDeemphUs === 75}
+              class:text-neutral-400={wfmDeemphUs !== 75}
+              aria-pressed={wfmDeemphUs === 75}
+              title="FCC / Americas / Japan"
+            >75µs</button>
+          </div>
+        {/if}
 
         <!-- Recorder (M2.1) -->
         <button

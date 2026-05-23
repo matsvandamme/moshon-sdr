@@ -51,6 +51,9 @@ export type StreamOptions = {
   biasT?: boolean;
   /** Direct-sampling mode for HF reception below ~24 MHz. */
   directSampling?: 'off' | 'i' | 'q';
+  /** WFM audio de-emphasis time constant in microseconds. 50 (ITU R1 /
+   *  Europe) or 75 (Americas / Japan). Default 50. */
+  deemphasisUs?: number;
   /**
    * SharedArrayBuffer the DSP worker writes 48 kHz mono f32 PCM into,
    * to be consumed by an AudioWorklet on the main thread.
@@ -195,6 +198,7 @@ export class RtlSdrSource {
       mode: opts.mode,
       bandwidthHz: opts.bandwidthHz,
       sampleRate: opts.sampleRate,
+      deemphasisUs: opts.deemphasisUs,
     });
 
     this.usbWorker!.postMessage({
@@ -260,6 +264,16 @@ export class RtlSdrSource {
   setRecording(on: boolean): void {
     if (!this.dspWorker) return;
     this.dspWorker.postMessage({ kind: 'setRecording', on });
+  }
+
+  /**
+   * Change the WFM de-emphasis time constant live. 50 µs (Europe) or
+   * 75 µs (Americas). Applies immediately if the current mode is WFM;
+   * otherwise the value is held until the next WFM mode entry.
+   */
+  setDeemphasis(us: number): void {
+    if (!this.dspWorker) return;
+    this.dspWorker.postMessage({ kind: 'setDeemphasis', us });
   }
 
   /** Stops streaming. Device remains permitted but the workers shut down. */

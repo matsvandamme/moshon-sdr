@@ -40,11 +40,20 @@ type InboundInit = {
   /** IQ sample rate the demods should configure for. Required field;
    *  defaulting hides bugs when the source forgets to pass it. */
   sampleRate: number;
+  /** WFM audio de-emphasis time constant in microseconds. 50 (ITU R1 /
+   *  Europe) or 75 (Americas / Japan). Defaults to 50 if omitted. */
+  deemphasisUs?: number;
 };
 type InboundSetMode = { kind: 'setMode'; mode: DemodMode; bandwidthHz: number };
 type InboundStop = { kind: 'stop' };
 type InboundSetRecording = { kind: 'setRecording'; on: boolean };
-type Inbound = InboundInit | InboundSetMode | InboundStop | InboundSetRecording;
+type InboundSetDeemphasis = { kind: 'setDeemphasis'; us: number };
+type Inbound =
+  | InboundInit
+  | InboundSetMode
+  | InboundStop
+  | InboundSetRecording
+  | InboundSetDeemphasis;
 
 type OutboundReady = { kind: 'ready' };
 type OutboundFft = { kind: 'fft'; bins: Float32Array; time: number };
@@ -96,6 +105,9 @@ let demod: Demod | null = null;
 let currentMode: DemodMode = 'wfm';
 let currentSampleRate = 2_400_000;
 let currentBandwidth = 200_000;
+/** WFM audio de-emphasis time constant in microseconds. Applied at
+ *  WfmDemod construction time. Default 50 (Europe). */
+let currentDeemphasisUs = 50;
 let iqBufferForFft: Uint8Array | null = null;
 let running = false;
 let minPostIntervalMs = 33;
@@ -130,6 +142,7 @@ function buildDemod(mode: DemodMode, bandwidthHz: number, sampleRate: number): D
   switch (mode) {
     case 'wfm': {
       const w = new WfmDemod(sampleRate);
+      w.set_deemphasis_us(currentDeemphasisUs);
       wfmDemodRef = w;
       return w;
     }
@@ -242,6 +255,9 @@ async function setup(opts: InboundInit) {
       throw new Error(`DSP worker: invalid sampleRate ${String(opts.sampleRate)}`);
     }
     currentSampleRate = sr;
+    if (typeof opts.deemphasisUs === 'number' && opts.deemphasisUs > 0) {
+      currentDeemphasisUs = opts.deemphasisUs;
+    }
     fft = new FftContext(opts.fftSize);
     rebuildDemod(opts.mode, opts.bandwidthHz);
     iqRing = new SabRing(opts.iqRing);
@@ -406,6 +422,14 @@ self.onmessage = (e: MessageEvent<Inbound>) => {
       break;
     case 'setRecording':
       recording = msg.on;
+      break;
+    case 'setDeemphasis':
+      if (typeof msg.us === 'number' && msg.us > 0) {
+        currentDeemphasisUs = msg.us;
+        // Apply live if we're currently demodulating WFM. Other modes
+        // pick the new value up on their next WFM construction.
+        if (wfmDemodRef) wfmDemodRef.set_deemphasis_us(msg.us);
+      }
       break;
     case 'stop':
       running = false;

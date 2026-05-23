@@ -34,6 +34,8 @@ export type StreamOptions = {
   /** Software offset-tuning shift in Hz. Applied client-side via NCO; the
    *  remote rtl_tcp server is tuned to centerFreq + offsetHz. */
   offsetHz?: number;
+  /** WFM audio de-emphasis time constant in microseconds (50 or 75). */
+  deemphasisUs?: number;
   audioRing: SharedArrayBuffer;
 };
 
@@ -161,6 +163,7 @@ export class RtlTcpSource {
       mode: opts.mode,
       bandwidthHz: opts.bandwidthHz,
       sampleRate: opts.sampleRate,
+      deemphasisUs: opts.deemphasisUs,
     });
 
     this.netWorker!.postMessage({
@@ -189,6 +192,12 @@ export class RtlTcpSource {
   setRecording(on: boolean): void {
     if (!this.dspWorker) return;
     this.dspWorker.postMessage({ kind: 'setRecording', on });
+  }
+
+  /** WFM de-emphasis time constant in µs (50 or 75). */
+  setDeemphasis(us: number): void {
+    if (!this.dspWorker) return;
+    this.dspWorker.postMessage({ kind: 'setDeemphasis', us });
   }
 
   async stop(): Promise<void> {

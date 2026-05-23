@@ -48,6 +48,9 @@ export type StreamOptions = {
   antennaPower?: boolean;
   /** Override the auto-picked baseband filter bandwidth (Hz). */
   bbFilterHz?: number;
+  /** WFM audio de-emphasis time constant in microseconds. 50 (Europe)
+   *  or 75 (Americas). Default 50. */
+  deemphasisUs?: number;
   audioRing: SharedArrayBuffer;
 };
 
@@ -149,6 +152,7 @@ export class HackRfSource {
       mode: opts.mode,
       bandwidthHz: opts.bandwidthHz,
       sampleRate: opts.sampleRate,
+      deemphasisUs: opts.deemphasisUs,
     });
 
     this.hrfWorker!.postMessage({
@@ -212,6 +216,13 @@ export class HackRfSource {
   setRecording(on: boolean): void {
     if (!this.dspWorker) return;
     this.dspWorker.postMessage({ kind: 'setRecording', on });
+  }
+
+  /** WFM de-emphasis time constant in µs (50 or 75). Live; takes effect
+   *  immediately for WFM, otherwise held for next WFM mode entry. */
+  setDeemphasis(us: number): void {
+    if (!this.dspWorker) return;
+    this.dspWorker.postMessage({ kind: 'setDeemphasis', us });
   }
 
   /**

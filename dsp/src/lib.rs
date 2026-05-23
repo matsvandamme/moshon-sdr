@@ -362,10 +362,17 @@ const WFM_LR_CARRIER_HZ: f32 = 38_000.0;
 const WFM_PILOT_THRESHOLD: f32 = 0.02;
 /// Smoothing for the pilot envelope. Lower = faster lock / faster drop.
 const WFM_PILOT_ENV_ALPHA: f32 = 0.001;
-/// Audio de-emphasis time constant. 50 µs in ITU Region 1 (Europe), 75 µs
-/// in North America. We target R1 by default — see the open question in
-/// MEMORY.md about exposing this as a user knob.
+/// Default audio de-emphasis time constant. 50 µs in ITU Region 1
+/// (Europe), 75 µs in North America. The default targets R1; the user
+/// can change it live via `WfmDemod::set_deemphasis_us`.
 const WFM_DEEMPH_TAU_S: f32 = 50e-6;
+
+/// Compute the single-pole de-emphasis IIR coefficient
+/// `α = exp(-1 / (τ · fs))` for a given time constant in seconds at the
+/// 48 kHz audio rate.
+fn deemph_alpha_for(tau_s: f32) -> f32 {
+    (-1.0 / (tau_s * AUDIO_RATE)).exp()
+}
 
 // ─── RDS constants ───────────────────────────────────────────────────────
 /// RDS subcarrier frequency (Hz). 3× the 19 kHz pilot, locked to it.
@@ -794,7 +801,8 @@ impl WfmDemod {
         let audio_scale = WFM_IF_RATE / (PI * WFM_DEVIATION);
 
         // De-emphasis: y[n] = (1-α)·x[n] + α·y[n-1], with α = exp(-1/(τ·fs)).
-        let deemph_alpha = (-1.0 / (WFM_DEEMPH_TAU_S * AUDIO_RATE)).exp();
+        // Default τ is set for ITU R1 (Europe); change via set_deemphasis_us.
+        let deemph_alpha = deemph_alpha_for(WFM_DEEMPH_TAU_S);
 
         WfmDemod {
             iq_decim: ComplexDecimator::new(if_decim, iq_taps),
@@ -833,6 +841,15 @@ impl WfmDemod {
         if !enabled {
             self.stereo_locked = false;
         }
+    }
+
+    /// Set the audio de-emphasis time constant in microseconds. Standard
+    /// values are 50 µs (ITU R1 / Europe) and 75 µs (North America). The
+    /// coefficient is recomputed; existing filter state is preserved so
+    /// there's no click on the transition.
+    pub fn set_deemphasis_us(&mut self, us: f32) {
+        let tau_s = (us.max(1.0)) * 1e-6;
+        self.deemph_alpha = deemph_alpha_for(tau_s);
     }
 
     /// True when the smoothed pilot envelope exceeds the threshold AND
@@ -2145,6 +2162,39 @@ mod tests {
         assert!(
             crossings_f > 0.8 * expected_crossings && crossings_f < 1.2 * expected_crossings,
             "CW BFO frequency off: expected ~{expected_crossings} crossings, got {crossings}",
+        );
+    }
+
+    /// Sanity-check the de-emphasis coefficient against the closed-form
+    /// expression for both standard time constants. 50 µs / 75 µs differ
+    /// by a clearly distinguishable margin (α₅₀ ≈ 0.659, α₇₅ ≈ 0.768),
+    /// so the test is a regression guard against accidentally inlining
+    /// the wrong τ.
+    #[test]
+    fn deemphasis_alpha_matches_closed_form() {
+        let a50 = deemph_alpha_for(50e-6);
+        let a75 = deemph_alpha_for(75e-6);
+        let expected_50 = (-1.0_f32 / (50e-6_f32 * 48_000.0_f32)).exp();
+        let expected_75 = (-1.0_f32 / (75e-6_f32 * 48_000.0_f32)).exp();
+        assert!((a50 - expected_50).abs() < 1e-6, "α(50µs) = {a50}");
+        assert!((a75 - expected_75).abs() < 1e-6, "α(75µs) = {a75}");
+        assert!(a75 > a50, "75 µs should give a larger (slower) α");
+    }
+
+    /// `set_deemphasis_us` must update the coefficient on a live demod.
+    #[test]
+    fn wfm_set_deemphasis_us_updates_alpha() {
+        let mut demod = WfmDemod::new(WFM_INPUT_RATE);
+        let a_default = demod.deemph_alpha;
+        demod.set_deemphasis_us(75.0);
+        let a_75 = demod.deemph_alpha;
+        assert!(
+            (a_75 - deemph_alpha_for(75e-6)).abs() < 1e-6,
+            "α after set_deemphasis_us(75) = {a_75}",
+        );
+        assert!(
+            a_75 > a_default,
+            "75 µs should be slower than the default 50 µs"
         );
     }
 }
