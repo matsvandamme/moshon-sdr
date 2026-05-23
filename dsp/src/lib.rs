@@ -1049,8 +1049,37 @@ const NARROW_IF_RATE: f32 = 240_000.0;
 const NARROW_AUDIO_DECIM: usize = 5;
 /// Default NFM peak deviation for the audio scaling. Typical ham 2 m / 70 cm.
 const NFM_DEFAULT_DEVIATION: f32 = 5_000.0;
-/// Single-pole DC-block coefficient for AM. ~24 Hz HPF at 48 kHz output.
-const AM_DC_ALPHA: f32 = 0.995;
+/// Single-pole DC-block coefficient. α = 0.995 corresponds to a ~24 Hz
+/// HPF at the 48 kHz audio rate — well below the lowest audible content
+/// for voice modes, so it strips residual DC offset without colouring
+/// the audio. Reused across AM (carrier component), NFM (discriminator
+/// bias), SSB (Weaver output asymmetry), and CW (BFO mixer leak).
+const DC_BLOCK_ALPHA: f32 = 0.995;
+
+/// Single-pole DC-blocker. y[n] = x[n] − x[n−1] + α·y[n−1].
+struct DcBlock {
+    x_prev: f32,
+    y_prev: f32,
+    alpha: f32,
+}
+
+impl DcBlock {
+    fn new(alpha: f32) -> Self {
+        Self {
+            x_prev: 0.0,
+            y_prev: 0.0,
+            alpha,
+        }
+    }
+
+    #[inline]
+    fn process(&mut self, x: f32) -> f32 {
+        let y = x - self.x_prev + self.alpha * self.y_prev;
+        self.x_prev = x;
+        self.y_prev = y;
+        y
+    }
+}
 /// Clamp range for user-set channel bandwidth. Narrower than 1.5 kHz makes
 /// the FIR ringing dominate; wider than ~40 % of `NARROW_IF_RATE` aliases.
 const NARROW_BW_MIN: f32 = 1_500.0;
@@ -1094,6 +1123,11 @@ pub struct NfmDemod {
     chan_decim: ComplexDecimator,
     last_z: Complex<f32>,
     audio_scale: f32,
+    /// Strips the discriminator's static bias (carrier offset → constant
+    /// phase increment → constant DC out of the atan2). Without this the
+    /// audio sits on a small offset that the speaker treats as click on
+    /// every retune.
+    dc_block: DcBlock,
     iq_in: Vec<Complex<f32>>,
     iq_if: Vec<Complex<f32>>,
     iq_chan: Vec<Complex<f32>>,
@@ -1117,6 +1151,7 @@ impl NfmDemod {
             chan_decim: ComplexDecimator::new(NARROW_AUDIO_DECIM, stage2),
             last_z: Complex { re: 1.0, im: 0.0 },
             audio_scale,
+            dc_block: DcBlock::new(DC_BLOCK_ALPHA),
             iq_in: Vec::with_capacity(65_536),
             iq_if: Vec::with_capacity(65_536 / if_decim + 16),
             iq_chan: Vec::with_capacity(65_536 / (if_decim * NARROW_AUDIO_DECIM) + 16),
@@ -1137,7 +1172,7 @@ impl NfmDemod {
         for &z in &self.iq_chan {
             let prod = z * self.last_z.conj();
             let phase = prod.im.atan2(prod.re);
-            audio.push(phase * self.audio_scale);
+            audio.push(self.dc_block.process(phase * self.audio_scale));
             self.last_z = z;
         }
         audio
@@ -1158,9 +1193,8 @@ impl Default for NfmDemod {
 pub struct AmDemod {
     iq_decim: ComplexDecimator,
     chan_decim: ComplexDecimator,
-    /// DC-block state. y[n] = x[n] − x[n−1] + α·y[n−1].
-    dc_x_prev: f32,
-    dc_y_prev: f32,
+    /// Strips the (DC) carrier component from the envelope.
+    dc_block: DcBlock,
     iq_in: Vec<Complex<f32>>,
     iq_if: Vec<Complex<f32>>,
     iq_chan: Vec<Complex<f32>>,
@@ -1177,8 +1211,7 @@ impl AmDemod {
         AmDemod {
             iq_decim: ComplexDecimator::new(if_decim, stage1),
             chan_decim: ComplexDecimator::new(NARROW_AUDIO_DECIM, stage2),
-            dc_x_prev: 0.0,
-            dc_y_prev: 0.0,
+            dc_block: DcBlock::new(DC_BLOCK_ALPHA),
             iq_in: Vec::with_capacity(65_536),
             iq_if: Vec::with_capacity(65_536 / if_decim + 16),
             iq_chan: Vec::with_capacity(65_536 / (if_decim * NARROW_AUDIO_DECIM) + 16),
@@ -1198,11 +1231,7 @@ impl AmDemod {
         let mut audio = Vec::with_capacity(self.iq_chan.len());
         for &z in &self.iq_chan {
             let env = (z.re * z.re + z.im * z.im).sqrt();
-            // Single-pole DC-block strips the carrier component.
-            let y = env - self.dc_x_prev + AM_DC_ALPHA * self.dc_y_prev;
-            self.dc_x_prev = env;
-            self.dc_y_prev = y;
-            audio.push(y);
+            audio.push(self.dc_block.process(env));
         }
         audio
     }
@@ -1250,6 +1279,8 @@ pub struct SsbDemod {
     sideband_sign: f32,
     /// Half-bandwidth LPF applied to the shifted IQ; kills the image sideband.
     weaver_lpf: ComplexFir,
+    /// Removes residual DC bias from the Weaver Re{} output.
+    dc_block: DcBlock,
     iq_in: Vec<Complex<f32>>,
     iq_if: Vec<Complex<f32>>,
     iq_chan: Vec<Complex<f32>>,
@@ -1277,6 +1308,7 @@ impl SsbDemod {
             nco_step,
             sideband_sign,
             weaver_lpf: ComplexFir::new(weaver_taps),
+            dc_block: DcBlock::new(DC_BLOCK_ALPHA),
             iq_in: Vec::with_capacity(65_536),
             iq_if: Vec::with_capacity(65_536 / if_decim + 16),
             iq_chan: Vec::with_capacity(65_536 / (if_decim * NARROW_AUDIO_DECIM) + 16),
@@ -1310,7 +1342,7 @@ impl SsbDemod {
                 re: cos_p,
                 im: s * sin_p,
             };
-            audio.push((z_filt * nco_back).re);
+            audio.push(self.dc_block.process((z_filt * nco_back).re));
 
             self.nco_phase += self.nco_step;
             if self.nco_phase >= 2.0 * PI {
@@ -1353,6 +1385,8 @@ pub struct CwDemod {
     chan_decim: ComplexDecimator,
     bfo_phase: f32,
     bfo_step: f32,
+    /// Removes BFO mixer DC leak so the tone sits cleanly on zero.
+    dc_block: DcBlock,
     iq_in: Vec<Complex<f32>>,
     iq_if: Vec<Complex<f32>>,
     iq_chan: Vec<Complex<f32>>,
@@ -1375,6 +1409,7 @@ impl CwDemod {
             chan_decim: ComplexDecimator::new(NARROW_AUDIO_DECIM, stage2),
             bfo_phase: 0.0,
             bfo_step,
+            dc_block: DcBlock::new(DC_BLOCK_ALPHA),
             iq_in: Vec::with_capacity(65_536),
             iq_if: Vec::with_capacity(65_536 / if_decim + 16),
             iq_chan: Vec::with_capacity(65_536 / (if_decim * NARROW_AUDIO_DECIM) + 16),
@@ -1395,7 +1430,7 @@ impl CwDemod {
         for &z in &self.iq_chan {
             let (sin_p, cos_p) = self.bfo_phase.sin_cos();
             // Re{z · e^(+j·ω_bfo·t)} = z.re·cos − z.im·sin.
-            audio.push(z.re * cos_p - z.im * sin_p);
+            audio.push(self.dc_block.process(z.re * cos_p - z.im * sin_p));
             self.bfo_phase += self.bfo_step;
             if self.bfo_phase >= 2.0 * PI {
                 self.bfo_phase -= 2.0 * PI;
@@ -2179,6 +2214,35 @@ mod tests {
         assert!((a50 - expected_50).abs() < 1e-6, "α(50µs) = {a50}");
         assert!((a75 - expected_75).abs() < 1e-6, "α(75µs) = {a75}");
         assert!(a75 > a50, "75 µs should give a larger (slower) α");
+    }
+
+    /// DC block must remove a constant offset (steady-state output → 0)
+    /// while leaving a non-DC tone roughly intact in amplitude (≥80 % of
+    /// the input peak for a 1 kHz tone at 48 kHz).
+    #[test]
+    fn dc_block_strips_dc_passes_tone() {
+        let mut blk = DcBlock::new(DC_BLOCK_ALPHA);
+        // Step input at 1.0 — let it settle, then verify output decays.
+        let mut last = 0.0;
+        for _ in 0..20_000 {
+            last = blk.process(1.0);
+        }
+        assert!(
+            last.abs() < 0.05,
+            "DC block didn't settle to ~0 (got {last})"
+        );
+
+        // 1 kHz tone, 48 kHz rate. After settle, peak should be near 1.0.
+        let mut blk = DcBlock::new(DC_BLOCK_ALPHA);
+        let mut peak = 0.0f32;
+        for n in 0..4_800 {
+            let x = (2.0 * PI * 1_000.0 * (n as f32) / 48_000.0).sin();
+            let y = blk.process(x);
+            if n > 240 {
+                peak = peak.max(y.abs());
+            }
+        }
+        assert!(peak > 0.8, "DC block over-attenuated a 1 kHz tone: {peak}");
     }
 
     /// `set_deemphasis_us` must update the coefficient on a live demod.

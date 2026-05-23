@@ -98,6 +98,23 @@ function monoToInterleavedStereo(mono: Float32Array): Float32Array {
   return out;
 }
 
+/** Soft-limit each sample to ±1.0 in-place. Linear pass-through below
+ *  ±LIMIT_KNEE; smooth tanh-style roll-off above. Prevents speaker-pop
+ *  on transient peaks (a strong signal kicking the demod, an unsquelched
+ *  noise spike, etc.) without colouring nominal-level audio. */
+const LIMIT_KNEE = 0.85;
+const LIMIT_HEADROOM = 1 - LIMIT_KNEE;
+function softLimitInPlace(buf: Float32Array): void {
+  for (let i = 0; i < buf.length; i++) {
+    const x = buf[i];
+    const ax = x < 0 ? -x : x;
+    if (ax <= LIMIT_KNEE) continue;
+    const s = x < 0 ? -1 : 1;
+    const over = (ax - LIMIT_KNEE) / LIMIT_HEADROOM;
+    buf[i] = s * (LIMIT_KNEE + LIMIT_HEADROOM * Math.tanh(over));
+  }
+}
+
 let iqRing: SabRing | null = null;
 let audioRing: SabRing | null = null;
 let fft: FftContext | null = null;
@@ -362,6 +379,7 @@ async function processLoop() {
     if (audio.length > 0) {
       const stereo =
         currentMode === 'wfm' ? audio : monoToInterleavedStereo(audio);
+      softLimitInPlace(stereo);
       const bytes = new Uint8Array(stereo.buffer, stereo.byteOffset, stereo.byteLength);
       audioRing.write(bytes);
       maybeTapForRecording(stereo);
@@ -384,6 +402,7 @@ async function processLoop() {
         if (audioMore.length > 0) {
           const stereoMore =
             currentMode === 'wfm' ? audioMore : monoToInterleavedStereo(audioMore);
+          softLimitInPlace(stereoMore);
           const moreBytes = new Uint8Array(
             stereoMore.buffer,
             stereoMore.byteOffset,
