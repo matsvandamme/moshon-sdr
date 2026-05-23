@@ -25,7 +25,7 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   reporter: 'list',
   use: {
-    baseURL: 'http://127.0.0.1:5173',
+    baseURL: 'http://localhost:5173',
     trace: 'retain-on-failure',
   },
   projects: [
@@ -36,7 +36,7 @@ export default defineConfig({
   ],
   webServer: {
     command: 'pnpm run dev',
-    url: 'http://127.0.0.1:5173',
+    url: 'http://localhost:5173',
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
     stdout: 'pipe',
