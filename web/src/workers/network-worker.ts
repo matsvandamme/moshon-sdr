@@ -133,7 +133,12 @@ async function setup(opts: InboundInit): Promise<void> {
   bytesWritten = 0;
   bytesDropped = 0;
   pendingHeader = null;
-  currentSampleRate = opts.sampleRate;
+  const sr = Number(opts.sampleRate);
+  if (!Number.isFinite(sr) || sr <= 0) {
+    postOut({ kind: 'error', message: `Network worker: invalid sampleRate ${String(opts.sampleRate)}` });
+    return;
+  }
+  currentSampleRate = sr;
   currentDialFreq = opts.centerFreq;
   currentOffsetHz = opts.offsetHz ?? 0;
   nco.configure(currentOffsetHz, currentSampleRate);
@@ -144,7 +149,7 @@ async function setup(opts: InboundInit): Promise<void> {
 
   ws.onopen = () => {
     // Tell rtl_tcp what we want. Order matters: sample rate first, then freq.
-    sendCommand(CMD_SET_SAMPLE_RATE, opts.sampleRate);
+    sendCommand(CMD_SET_SAMPLE_RATE, sr);
     // Tune physical LO to dial + offset; NCO shifts samples back.
     applyTuning(currentDialFreq + currentOffsetHz, opts.gain);
     running = true;

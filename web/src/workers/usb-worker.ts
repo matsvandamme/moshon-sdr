@@ -114,7 +114,11 @@ async function init(opts: InboundInit) {
     bytesWrittenTotal = 0;
     chunkSize = opts.chunkSamples;
     statsIntervalMs = opts.statsIntervalMs;
-    currentSampleRate = opts.sampleRate;
+    const sr = Number(opts.sampleRate);
+    if (!Number.isFinite(sr) || sr <= 0) {
+      throw new Error(`USB worker: invalid sampleRate ${String(opts.sampleRate)}`);
+    }
+    currentSampleRate = sr;
     currentDialFreq = opts.centerFreq;
     currentOffsetHz = opts.offsetHz ?? 0;
     nco.configure(currentOffsetHz, currentSampleRate);
@@ -135,7 +139,7 @@ async function init(opts: InboundInit) {
     if (typeof opts.biasT === 'boolean') {
       await device.enableBiasTee(opts.biasT);
     }
-    const actualSampleRate = await device.setSampleRate(opts.sampleRate);
+    const actualSampleRate = await device.setSampleRate(sr);
     // Offset-tune: tune physical LO above the dial freq by `offsetHz`,
     // and let the NCO shift bring it back. Skip if direct sampling is on
     // (the bias-T / DC-spike concerns don't apply there).

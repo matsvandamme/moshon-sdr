@@ -72,9 +72,19 @@
     { value: 4_800_000, label: '4.8 MS/s' },
     { value: 9_600_000, label: '9.6 MS/s' },
   ];
-  // Derived below, after `inputMode` is declared. Forward declaration via
-  // function so the $derived expression sees inputMode when it evaluates.
+  // Populated reactively after `inputMode` is declared; can't $derived here
+  // because inputMode is declared further down.
   let availableSampleRates = $state<{ value: number; label: string }[]>(RTL_SAMPLE_RATES);
+
+  /** Defensive coercion. Svelte 5's `<select bind:value>` is supposed to
+   *  preserve the type from `<option value={r.value}>` but in practice the
+   *  DOM round-trip can yield a string — and `device.setSampleRate('2400000')`
+   *  blows up in unhelpful ways on the worker side. This helper makes any
+   *  downstream code that takes a number safe to call. */
+  function asValidRate(v: unknown): number {
+    const n = typeof v === 'number' ? v : Number(v);
+    return Number.isFinite(n) && n > 0 ? n : 2_400_000;
+  }
 
   // Three sources: RTL-SDR via WebUSB, HackRF One via WebUSB, and
   // rtl_tcp-over-WebSocket (remote bridge). They all expose the same
@@ -126,11 +136,18 @@
 
   // Keep the sample-rate options in sync with the selected source. If the
   // user flips RTL ↔ HackRF and the current rate isn't valid for the new
-  // source, snap to that source's default (2.4 MS/s).
+  // source, snap to that source's default (2.4 MS/s). Reading sampleRate
+  // via the local helper coerces any DOM-stringified value back to a
+  // number so the .some() comparison is type-safe.
   $effect(() => {
-    availableSampleRates = inputMode === 'hackrf' ? HACKRF_SAMPLE_RATES : RTL_SAMPLE_RATES;
-    if (!availableSampleRates.some((r) => r.value === sampleRate)) {
+    const list = inputMode === 'hackrf' ? HACKRF_SAMPLE_RATES : RTL_SAMPLE_RATES;
+    availableSampleRates = list;
+    const current = asValidRate(sampleRate);
+    if (!list.some((r) => r.value === current)) {
       sampleRate = 2_400_000;
+    } else if (current !== sampleRate) {
+      // Force the type to number so downstream code sees a number.
+      sampleRate = current;
     }
   });
 
@@ -545,7 +562,7 @@
       await startAudio();
       rtlStatus = 'streaming';
       const baseOpts = {
-        sampleRate,
+        sampleRate: asValidRate(sampleRate),
         centerFreq: tuning.centerFreq,
         gain: tuning.gain,
         fftSize: FFT_SIZE,
@@ -587,7 +604,7 @@
       await netSource.start({
         bridgeUrl,
         rtlTcpTarget: rtlTcpTarget.trim() || undefined,
-        sampleRate,
+        sampleRate: asValidRate(sampleRate),
         centerFreq: tuning.centerFreq,
         gain: tuning.gain,
         fftSize: FFT_SIZE,

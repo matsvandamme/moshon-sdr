@@ -237,7 +237,11 @@ function maybeDecodeCw(mono: Float32Array) {
 async function setup(opts: InboundInit) {
   try {
     await init();
-    currentSampleRate = opts.sampleRate;
+    const sr = Number(opts.sampleRate);
+    if (!Number.isFinite(sr) || sr <= 0) {
+      throw new Error(`DSP worker: invalid sampleRate ${String(opts.sampleRate)}`);
+    }
+    currentSampleRate = sr;
     fft = new FftContext(opts.fftSize);
     rebuildDemod(opts.mode, opts.bandwidthHz);
     iqRing = new SabRing(opts.iqRing);

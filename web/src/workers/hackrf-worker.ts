@@ -148,7 +148,11 @@ async function init(opts: InboundInit) {
     ring.reset();
     bytesWrittenTotal = 0;
     statsIntervalMs = opts.statsIntervalMs;
-    currentSampleRate = opts.sampleRate;
+    const sr = Number(opts.sampleRate);
+    if (!Number.isFinite(sr) || sr <= 0) {
+      throw new Error(`HackRF worker: invalid sampleRate ${String(opts.sampleRate)}`);
+    }
+    currentSampleRate = sr;
     currentDialFreq = opts.centerFreq;
     currentOffsetHz = opts.offsetHz ?? 0;
     nco.configure(currentOffsetHz, currentSampleRate);
@@ -171,7 +175,7 @@ async function init(opts: InboundInit) {
       HRF_REQ.SAMPLE_RATE_SET,
       0,
       0,
-      packSampleRatePayload(opts.sampleRate),
+      packSampleRatePayload(sr),
     );
     // Baseband filter: caller may override; else pick next supported value
     // above sampleRate * 0.75. Valid widths are fixed in firmware (1.75,
@@ -179,7 +183,7 @@ async function init(opts: InboundInit) {
     const bbFilterHz =
       opts.bbFilterHz && opts.bbFilterHz > 0
         ? snapToValidBbFilter(opts.bbFilterHz)
-        : pickBasebandFilter(opts.sampleRate);
+        : pickBasebandFilter(sr);
     await vendorOutNoData(
       device,
       HRF_REQ.BASEBAND_FILTER_BANDWIDTH_SET,
