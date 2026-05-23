@@ -56,8 +56,11 @@
   // ---- IQ stream config ----
   // Sample rate is picked at connect time and held for the session. Valid
   // values depend on the dongle: RTL-SDR supports up to ~3.2 MS/s, HackRF
-  // supports 2-20 MS/s. We expose a clean subset that produces a usable
-  // demod chain (input_rate / 240k must be a sensible integer).
+  // supports 2-20 MS/s per the official spec
+  // (https://hackrf.readthedocs.io/en/latest/hackrf_one.html). The HackRF
+  // docs recommend ≥8 MS/s so the MAX2837 baseband filter can adequately
+  // attenuate adjacent-channel interference; rates below 8 MS/s are
+  // supported but produce poorer alias rejection.
   let sampleRate = $state(2_400_000);
   const FFT_SIZE = 2048;
   const FFT_RATE_HZ = 30;
@@ -68,9 +71,19 @@
     { value: 2_880_000, label: '2.88 MS/s' },
   ];
   const HACKRF_SAMPLE_RATES = [
+    { value: 2_000_000, label: '2 MS/s (min)' },
     { value: 2_400_000, label: '2.4 MS/s (default)' },
+    { value: 4_000_000, label: '4 MS/s' },
     { value: 4_800_000, label: '4.8 MS/s' },
+    { value: 6_000_000, label: '6 MS/s' },
+    { value: 8_000_000, label: '8 MS/s (recommended floor)' },
     { value: 9_600_000, label: '9.6 MS/s' },
+    { value: 10_000_000, label: '10 MS/s' },
+    { value: 12_000_000, label: '12 MS/s' },
+    { value: 14_000_000, label: '14 MS/s' },
+    { value: 16_000_000, label: '16 MS/s' },
+    { value: 18_000_000, label: '18 MS/s' },
+    { value: 20_000_000, label: '20 MS/s (max)' },
   ];
   // Populated reactively after `inputMode` is declared; can't $derived here
   // because inputMode is declared further down.

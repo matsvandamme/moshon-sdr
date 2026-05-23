@@ -17,8 +17,17 @@ import type { Mode } from '../state/tuning.svelte';
 import { HACKRF_USB_FILTERS, type HackRfBoardInfo, type HackRfGain } from './hackrf-protocol';
 import type { DemodMode } from '../../workers/dsp-worker';
 
-const IQ_RING_CAPACITY_BYTES = 8 * 1024 * 1024;
+/** SAB ring floor — covers ~1.7 s at 2.4 MS/s. For higher HackRF rates we
+ *  scale up at start() so the DSP worker has at least ~500 ms of headroom
+ *  even at 20 MS/s (≈40 MB/s). */
+const IQ_RING_FLOOR_BYTES = 8 * 1024 * 1024;
 const STATS_INTERVAL_MS = 250;
+
+function ringCapacityForRate(sampleRate: number): number {
+  // 2 bytes per IQ pair, target ~500 ms buffered.
+  const wanted = Math.ceil(sampleRate * 2 * 0.5);
+  return Math.max(IQ_RING_FLOOR_BYTES, wanted);
+}
 
 export type HackRfStatus = 'idle' | 'connecting' | 'connected' | 'streaming' | 'closing' | 'error';
 
@@ -122,7 +131,7 @@ export class HackRfSource {
   async start(opts: StreamOptions): Promise<void> {
     if (!this.device) throw new Error('connect() before start()');
 
-    this.ring = SabRing.create(IQ_RING_CAPACITY_BYTES);
+    this.ring = SabRing.create(ringCapacityForRate(opts.sampleRate));
     const fftSize = opts.fftSize ?? 2048;
     const fftRateHz = opts.fftRateHz ?? 30;
 
