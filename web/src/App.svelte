@@ -39,6 +39,7 @@
   import NetworkConnect from './lib/ui/NetworkConnect.svelte';
   import AircraftPanel from './lib/ui/AircraftPanel.svelte';
   import LoraPanel from './lib/ui/LoraPanel.svelte';
+  import SweepPanel from './lib/ui/SweepPanel.svelte';
   import { AudioPipeline } from './lib/audio/audio-pipeline';
   import { recorder } from './lib/audio/recorder.svelte';
   import { aircraftTracker } from './lib/state/aircraft.svelte';
@@ -112,6 +113,10 @@
   } | null>(null);
   let hrfInfoError = $state<string | null>(null);
   let hrfInfoBusy = $state(false);
+
+  let sweepOpen = $state(false);
+  /** Save the dial before sweep so we restore on exit. */
+  let savedTuneBeforeSweep: number | null = null;
 
   function activeSource(): RtlSdrSource | HackRfSource | RtlTcpSource {
     if (inputMode === 'hackrf') return hackrfSource;
@@ -650,6 +655,30 @@
     }
   }
 
+  function openSweep() {
+    if (rtlStatus !== 'streaming') return;
+    savedTuneBeforeSweep = tuning.centerFreq;
+    sweepOpen = true;
+  }
+
+  function closeSweep() {
+    sweepOpen = false;
+    if (savedTuneBeforeSweep !== null) {
+      tuning.centerFreq = savedTuneBeforeSweep;
+      savedTuneBeforeSweep = null;
+    }
+  }
+
+  function onSweepRetune(hz: number) {
+    tuning.centerFreq = hz;
+  }
+
+  function onSweepPick(hz: number) {
+    sweepOpen = false;
+    tuning.centerFreq = hz;
+    savedTuneBeforeSweep = null;
+  }
+
   function onClickToTune(hz: number) {
     tuning.centerFreq = hz;
   }
@@ -968,6 +997,25 @@
         </dl>
       </div>
 
+      {#if sweepOpen}
+        <div class="mb-3">
+          <SweepPanel
+            sampleRate={sampleRate}
+            latestBins={latestBins}
+            onRetune={onSweepRetune}
+            onCancel={closeSweep}
+            onPickFrequency={onSweepPick}
+          />
+          <button
+            type="button"
+            onclick={closeSweep}
+            class="mt-2 text-xs text-neutral-500 hover:text-neutral-200 font-mono cursor-pointer underline decoration-dotted"
+          >
+            ← back to live spectrum
+          </button>
+        </div>
+      {/if}
+
       <div class="rounded-md overflow-hidden border border-neutral-800 mb-3 bg-black">
         <SpectrumWaterfall
           bins={latestBins}
@@ -1200,6 +1248,23 @@
           <div class="text-[11px] text-neutral-500">
             Sample rate: <span class="text-neutral-300">{(sampleRate / 1e6).toFixed(2)} MS/s</span>
             <span class="text-neutral-600 ml-2">(locked while streaming)</span>
+          </div>
+
+          <!-- Spectrum sweep launcher. -->
+          <div class="text-[11px]">
+            <button
+              type="button"
+              onclick={openSweep}
+              disabled={sweepOpen}
+              class="rounded border border-neutral-700 px-2 py-1 text-neutral-300
+                     hover:border-neutral-500 cursor-pointer disabled:opacity-50
+                     disabled:cursor-not-allowed"
+            >
+              Open spectrum sweep…
+            </button>
+            <span class="text-neutral-600 ml-2">
+              wide-band scan via repeated retunes; click peaks to tune
+            </span>
           </div>
 
           <!-- Offset tuning (universal). -->
