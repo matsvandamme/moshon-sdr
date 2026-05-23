@@ -27,9 +27,11 @@ import {
   distributeGain,
   packSampleRatePayload,
   packSetFreqPayload,
+  readHackRfBoardInfo,
   vendorIn1Byte,
   vendorOutNoData,
   vendorOutWithData,
+  type HackRfBoardInfo,
   type HackRfGain,
 } from '../lib/usb/hackrf-protocol';
 
@@ -67,6 +69,7 @@ type InboundAdvanced = {
   antennaPower?: boolean;
   bbFilterHz?: number;
 };
+type InboundGetInfo = { kind: 'getInfo' };
 type InboundStop = { kind: 'stop' };
 type InboundClose = { kind: 'close' };
 type Inbound =
@@ -74,6 +77,7 @@ type Inbound =
   | InboundRetune
   | InboundSetStageGain
   | InboundAdvanced
+  | InboundGetInfo
   | InboundStop
   | InboundClose;
 
@@ -89,8 +93,14 @@ type OutboundStats = {
   time: number;
 };
 type OutboundStopped = { kind: 'stopped' };
+type OutboundInfo = { kind: 'info'; info: HackRfBoardInfo };
 type OutboundError = { kind: 'error'; message: string };
-type Outbound = OutboundStarted | OutboundStats | OutboundStopped | OutboundError;
+type Outbound =
+  | OutboundStarted
+  | OutboundStats
+  | OutboundStopped
+  | OutboundInfo
+  | OutboundError;
 
 /** Transfer size for bulk reads. 32 KB is the libhackrf reference default
  *  and matches HackRF One's USB block size. */
@@ -315,6 +325,16 @@ async function retune(opts: InboundRetune) {
   }
 }
 
+async function postDeviceInfo() {
+  if (!device) return;
+  try {
+    const info = await readHackRfBoardInfo(device);
+    postOut({ kind: 'info', info });
+  } catch (err) {
+    postOut({ kind: 'error', message: `HackRF getInfo: ${errMessage(err)}` });
+  }
+}
+
 async function applyAdvanced(opts: InboundAdvanced) {
   if (!device) return;
   try {
@@ -403,6 +423,9 @@ self.onmessage = (e: MessageEvent<Inbound>) => {
       break;
     case 'advanced':
       void applyAdvanced(msg);
+      break;
+    case 'getInfo':
+      void postDeviceInfo();
       break;
     case 'stop':
       void stop();

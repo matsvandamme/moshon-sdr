@@ -86,6 +86,15 @@
   let rtlDirectSampling = $state<'off' | 'i' | 'q'>('off');
   let hrfAntennaPower = $state(false);
 
+  let hrfInfo = $state<{
+    boardName: string;
+    firmwareVersion: string;
+    partId: string;
+    serialNumber: string;
+  } | null>(null);
+  let hrfInfoError = $state<string | null>(null);
+  let hrfInfoBusy = $state(false);
+
   function activeSource(): RtlSdrSource | HackRfSource | RtlTcpSource {
     if (inputMode === 'hackrf') return hackrfSource;
     if (inputMode === 'network') return netSource;
@@ -597,6 +606,19 @@
     } catch (err) {
       rtlStatus = 'error';
       rtlError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function onFetchHrfInfo() {
+    if (inputMode !== 'hackrf') return;
+    hrfInfoBusy = true;
+    hrfInfoError = null;
+    try {
+      hrfInfo = await hackrfSource.getDeviceInfo();
+    } catch (err) {
+      hrfInfoError = err instanceof Error ? err.message : String(err);
+    } finally {
+      hrfInfoBusy = false;
     }
   }
 
@@ -1207,6 +1229,46 @@
                   ~3.0 V/50 mA on the antenna port for active antennas / LNAs
                 </span>
               </label>
+
+              <div class="flex items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onclick={onFetchHrfInfo}
+                  disabled={hrfInfoBusy}
+                  class="rounded border border-neutral-700 px-2 py-1 text-neutral-300
+                         hover:border-neutral-500 cursor-pointer disabled:opacity-50
+                         disabled:cursor-not-allowed"
+                >
+                  {hrfInfoBusy ? 'Reading…' : 'Read device info'}
+                </button>
+                {#if hrfInfoError}
+                  <span class="text-amber-400 text-[10px]">{hrfInfoError}</span>
+                {/if}
+              </div>
+              {#if hrfInfo}
+                <dl class="grid grid-cols-[6rem_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+                  <dt class="text-neutral-500">Board</dt>
+                  <dd class="text-neutral-200">{hrfInfo.boardName}</dd>
+                  <dt class="text-neutral-500">Firmware</dt>
+                  <dd class="text-neutral-200 break-words">{hrfInfo.firmwareVersion || '—'}</dd>
+                  <dt class="text-neutral-500">Part ID</dt>
+                  <dd class="text-neutral-300 break-all">{hrfInfo.partId}</dd>
+                  <dt class="text-neutral-500">Serial</dt>
+                  <dd class="text-neutral-300 break-all">{hrfInfo.serialNumber}</dd>
+                </dl>
+              {/if}
+            </div>
+          {/if}
+
+          {#if inputMode === 'usb'}
+            <div class="border-t border-neutral-800 pt-3 space-y-1 text-[11px]">
+              <div class="text-neutral-500 uppercase mb-1">RTL-SDR (USB descriptor)</div>
+              <p class="text-neutral-400">
+                Tuner type isn't reported by the WebUSB driver. Approximate
+                identification: VID:PID and product string from the device
+                descriptor. Most RTL-SDR Blog v3/v4 dongles use the R820T2 or
+                R828D tuner.
+              </p>
             </div>
           {/if}
         </div>

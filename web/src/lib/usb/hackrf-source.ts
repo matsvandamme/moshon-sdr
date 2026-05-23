@@ -14,7 +14,7 @@
 
 import { SabRing } from '../ring/sab-ring';
 import type { Mode } from '../state/tuning.svelte';
-import { HACKRF_USB_FILTERS, type HackRfGain } from './hackrf-protocol';
+import { HACKRF_USB_FILTERS, type HackRfBoardInfo, type HackRfGain } from './hackrf-protocol';
 import type { DemodMode } from '../../workers/dsp-worker';
 
 const IQ_RING_CAPACITY_BYTES = 8 * 1024 * 1024;
@@ -67,8 +67,9 @@ export type AdsbFramesCallback = (evt: AdsbFramesEvent) => void;
 type HrfStarted = { kind: 'started'; actualSampleRate: number; actualFrequency: number };
 type HrfStats = { kind: 'stats'; bytesWritten: number; bytesDropped: number; time: number };
 type HrfStopped = { kind: 'stopped' };
+type HrfInfo = { kind: 'info'; info: HackRfBoardInfo };
 type HrfErr = { kind: 'error'; message: string };
-type HrfOutbound = HrfStarted | HrfStats | HrfStopped | HrfErr;
+type HrfOutbound = HrfStarted | HrfStats | HrfStopped | HrfInfo | HrfErr;
 
 // Mirror DSP worker.
 type DspReady = { kind: 'ready' };
@@ -169,6 +170,29 @@ export class HackRfSource {
     if (!this.hrfWorker) return;
     this.hrfWorker.postMessage({ kind: 'advanced', ...opts });
   }
+
+  /**
+   * Query the device for its board ID / firmware / serial. Resolves on the
+   * next `info` message from the worker. Throws if the worker isn't up or
+   * a query is already in flight (no internal queue; one at a time is
+   * plenty since the user only fetches on demand).
+   */
+  getDeviceInfo(timeoutMs = 3000): Promise<HackRfBoardInfo> {
+    if (!this.hrfWorker) return Promise.reject(new Error('HackRF not connected'));
+    return new Promise<HackRfBoardInfo>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.infoResolver = null;
+        reject(new Error('HackRF getDeviceInfo timeout'));
+      }, timeoutMs);
+      this.infoResolver = (info) => {
+        clearTimeout(timer);
+        this.infoResolver = null;
+        resolve(info);
+      };
+      this.hrfWorker!.postMessage({ kind: 'getInfo' });
+    });
+  }
+  private infoResolver: ((info: HackRfBoardInfo) => void) | null = null;
 
   setMode(mode: DemodMode, bandwidthHz: number): void {
     if (!this.dspWorker) return;
@@ -298,6 +322,9 @@ export class HackRfSource {
       case 'stopped':
         this.stopResolver?.resolve();
         this.stopResolver = null;
+        break;
+      case 'info':
+        this.infoResolver?.(msg.info);
         break;
       case 'error':
         this.startResolver?.reject(new Error(msg.message));
