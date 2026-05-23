@@ -55,6 +55,7 @@ type InboundSetRecording = { kind: 'setRecording'; on: boolean };
 type InboundSetDeemphasis = { kind: 'setDeemphasis'; us: number };
 type InboundSetSquelch = { kind: 'setSquelch'; db: number };
 type InboundSetAgc = { kind: 'setAgc'; on: boolean };
+type InboundSetIqRecording = { kind: 'setIqRecording'; on: boolean };
 type Inbound =
   | InboundInit
   | InboundSetMode
@@ -62,7 +63,8 @@ type Inbound =
   | InboundSetRecording
   | InboundSetDeemphasis
   | InboundSetSquelch
-  | InboundSetAgc;
+  | InboundSetAgc
+  | InboundSetIqRecording;
 
 type OutboundReady = { kind: 'ready' };
 type OutboundFft = { kind: 'fft'; bins: Float32Array; time: number };
@@ -70,6 +72,7 @@ type OutboundAudio = { kind: 'audio'; samples: Float32Array; time: number };
 type OutboundCwText = { kind: 'cwText'; text: string; wpm: number };
 type OutboundAdsb = { kind: 'adsbFrames'; framesJson: string };
 type OutboundSquelch = { kind: 'squelch'; open: boolean };
+type OutboundIq = { kind: 'iq'; samples: Uint8Array; time: number };
 type OutboundRds = {
   kind: 'rds';
   synced: boolean;
@@ -87,6 +90,7 @@ type Outbound =
   | OutboundAdsb
   | OutboundRds
   | OutboundSquelch
+  | OutboundIq
   | OutboundError;
 
 type Demod = {
@@ -201,6 +205,7 @@ let running = false;
 let minPostIntervalMs = 33;
 let lastPostMs = 0;
 let recording = false;
+let iqRecording = false;
 let cwDecoder: CwDecoder | null = null;
 let adsbDemod: AdsbDemod | null = null;
 let wfmDemodRef: WfmDemod | null = null;
@@ -228,6 +233,17 @@ function maybeTapForRecording(stereo: Float32Array) {
   if (!recording || stereo.length === 0) return;
   const copy = new Float32Array(stereo);
   postOut({ kind: 'audio', samples: copy, time: performance.now() }, [copy.buffer]);
+}
+
+/**
+ * Forward a copy of the raw IQ bytes to main if IQ recording is on.
+ * Copy is unavoidable — the worker reuses its IQ scratch buffer across
+ * the FFT, demod, and (when on) ADS-B paths.
+ */
+function maybeTapIqForRecording(bytes: Uint8Array) {
+  if (!iqRecording || bytes.length === 0) return;
+  const copy = new Uint8Array(bytes);
+  postOut({ kind: 'iq', samples: copy, time: performance.now() }, [copy.buffer]);
 }
 
 function buildDemod(mode: DemodMode, bandwidthHz: number, sampleRate: number): Demod {
@@ -423,6 +439,7 @@ async function processLoop() {
       continue;
     }
     iqRing.read(iqBufferForFft);
+    maybeTapIqForRecording(iqBufferForFft);
 
     // Run FFT first (throttled).
     let bins: Float32Array | null = null;
@@ -441,6 +458,7 @@ async function processLoop() {
     if (currentMode === 'lora') {
       while (iqRing.available() >= demodScratch.length) {
         iqRing.read(demodScratch);
+        maybeTapIqForRecording(demodScratch);
       }
       const nowL = performance.now();
       if (nowL - lastPostMs >= minPostIntervalMs) {
@@ -462,6 +480,7 @@ async function processLoop() {
       // Also drain the backlog so we don't fall behind at 4.8 MB/s.
       while (iqRing.available() >= demodScratch.length) {
         iqRing.read(demodScratch);
+        maybeTapIqForRecording(demodScratch);
         try {
           adsbDemod.process(demodScratch);
         } catch (err) {
@@ -517,6 +536,7 @@ async function processLoop() {
     // startup backlog clears within a second or so.
     if (iqRing.available() >= demodScratch.length) {
       iqRing.read(demodScratch);
+      maybeTapIqForRecording(demodScratch);
       try {
         const audioMore = demod.process(demodScratch);
         if (audioMore.length > 0) {
@@ -580,6 +600,9 @@ self.onmessage = (e: MessageEvent<Inbound>) => {
       break;
     case 'setAgc':
       audioAgc.setEnabled(msg.on);
+      break;
+    case 'setIqRecording':
+      iqRecording = msg.on;
       break;
     case 'stop':
       running = false;

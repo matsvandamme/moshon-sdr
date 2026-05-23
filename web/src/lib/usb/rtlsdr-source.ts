@@ -139,6 +139,7 @@ type DspRds = {
 };
 type DspAdsb = { kind: 'adsbFrames'; framesJson: string };
 type DspSquelch = { kind: 'squelch'; open: boolean };
+type DspIq = { kind: 'iq'; samples: Uint8Array; time: number };
 type DspErr = { kind: 'error'; message: string };
 type DspOutbound =
   | DspReady
@@ -148,10 +149,13 @@ type DspOutbound =
   | DspRds
   | DspAdsb
   | DspSquelch
+  | DspIq
   | DspErr;
 
 export type SquelchEvent = { open: boolean };
 export type SquelchCallback = (evt: SquelchEvent) => void;
+export type IqSamplesEvent = { samples: Uint8Array; time: number };
+export type IqSamplesCallback = (evt: IqSamplesEvent) => void;
 
 export class RtlSdrSource {
   private usbWorker: Worker | null = null;
@@ -169,6 +173,7 @@ export class RtlSdrSource {
   private rdsListeners = new Set<RdsCallback>();
   private adsbListeners = new Set<AdsbFramesCallback>();
   private squelchListeners = new Set<SquelchCallback>();
+  private iqSamplesListeners = new Set<IqSamplesCallback>();
 
   /**
    * Opens a device via the WebUSB picker. Must be called inside a user-gesture
@@ -301,6 +306,13 @@ export class RtlSdrSource {
     this.dspWorker.postMessage({ kind: 'setAgc', on });
   }
 
+  /** Toggle whether the DSP worker streams raw IQ chunks back to main
+   *  for capture. Off by default; very high traffic when on. */
+  setIqRecording(on: boolean): void {
+    if (!this.dspWorker) return;
+    this.dspWorker.postMessage({ kind: 'setIqRecording', on });
+  }
+
   /** Stops streaming. Device remains permitted but the workers shut down. */
   async stop(): Promise<void> {
     if (!this.usbWorker) return;
@@ -375,6 +387,13 @@ export class RtlSdrSource {
     this.squelchListeners.add(cb);
     return () => {
       this.squelchListeners.delete(cb);
+    };
+  }
+
+  onIqSamples(cb: IqSamplesCallback): () => void {
+    this.iqSamplesListeners.add(cb);
+    return () => {
+      this.iqSamplesListeners.delete(cb);
     };
   }
 
@@ -464,6 +483,11 @@ export class RtlSdrSource {
       case 'squelch':
         for (const cb of this.squelchListeners) {
           cb({ open: msg.open });
+        }
+        break;
+      case 'iq':
+        for (const cb of this.iqSamplesListeners) {
+          cb({ samples: msg.samples, time: msg.time });
         }
         break;
       case 'error':

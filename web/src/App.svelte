@@ -42,6 +42,7 @@
   import SweepPanel from './lib/ui/SweepPanel.svelte';
   import { AudioPipeline } from './lib/audio/audio-pipeline';
   import { recorder } from './lib/audio/recorder.svelte';
+  import { iqRecorder } from './lib/audio/iq-recorder.svelte';
   import { aircraftTracker } from './lib/state/aircraft.svelte';
   import type { AdsbRawFrame } from './lib/dsp/adsb-parser';
   import { readHash, writeHash } from './lib/state/url-hash';
@@ -215,6 +216,7 @@
   let unsubRds: (() => void) | null = null;
   let unsubAdsb: (() => void) | null = null;
   let unsubSquelch: (() => void) | null = null;
+  let unsubIqSamples: (() => void) | null = null;
   let cwDecodedText = $state('');
   let cwDecodedWpm = $state(0);
 
@@ -538,6 +540,13 @@
     unsubSquelch = src.onSquelch((evt) => {
       squelchOpen = evt.open;
     });
+    unsubIqSamples = src.onIqSamples((evt) => {
+      const fits = iqRecorder.push(evt.samples);
+      if (!fits) {
+        // Cap reached — finalize so the user doesn't lose what was captured.
+        onIqRecordToggle();
+      }
+    });
   }
 
   async function startAudio() {
@@ -566,6 +575,7 @@
     unsubRds?.();
     unsubAdsb?.();
     unsubSquelch?.();
+    unsubIqSamples?.();
     unsubStats = null;
     unsubFft = null;
     unsubAudio = null;
@@ -574,8 +584,13 @@
     unsubRds = null;
     unsubAdsb = null;
     unsubSquelch = null;
-    // If a recording was in progress, save what we have.
+    unsubIqSamples = null;
+    // If recordings were in progress, save what we have.
     if (recorder.recording) recorder.stopAndDownload();
+    if (iqRecorder.recording) {
+      activeSource().setIqRecording(false);
+      iqRecorder.stopAndDownload();
+    }
   }
 
   // Wipe the decoded buffer whenever the user leaves CW mode so they don't
@@ -626,6 +641,19 @@
     } else {
       recorder.start();
       activeSource().setRecording(true);
+    }
+  }
+
+  function onIqRecordToggle() {
+    if (iqRecorder.recording) {
+      activeSource().setIqRecording(false);
+      iqRecorder.stopAndDownload();
+    } else {
+      iqRecorder.start({
+        sampleRate: asValidRate(sampleRate),
+        centerFreqHz: tuning.centerFreq,
+      });
+      activeSource().setIqRecording(true);
     }
   }
 
@@ -1397,6 +1425,34 @@
           {:else}
             <Download size={14} />
             <span>Rec</span>
+          {/if}
+        </button>
+
+        <!-- IQ recorder — captures raw IQ to SDR#-compatible WAV.
+             At 2.4 MS/s the 256 MB cap holds ~53 s; HackRF rates burn
+             through it much faster. -->
+        <button
+          type="button"
+          onclick={onIqRecordToggle}
+          disabled={rtlStatus !== 'streaming'}
+          class="inline-flex items-center gap-2 rounded border px-3 py-1.5 cursor-pointer
+                 disabled:opacity-40 disabled:cursor-not-allowed"
+          class:bg-amber-950={iqRecorder.recording}
+          class:border-amber-700={iqRecorder.recording}
+          class:text-amber-300={iqRecorder.recording}
+          class:border-neutral-700={!iqRecorder.recording}
+          class:text-neutral-300={!iqRecorder.recording}
+          aria-pressed={iqRecorder.recording}
+          title={iqRecorder.recording
+            ? `Stop & download IQ (${iqRecorder.seconds.toFixed(1)} s, ${(iqRecorder.totalBytes / 1024 / 1024).toFixed(0)} MB, cap ${iqRecorder.capMb} MB)`
+            : 'Record raw IQ to SDR#-compatible WAV'}
+        >
+          {#if iqRecorder.recording}
+            <Circle size={10} fill="currentColor" class="animate-pulse" />
+            <span class="tabular-nums">{iqRecorder.seconds.toFixed(0)}s IQ</span>
+          {:else}
+            <Download size={14} />
+            <span>Rec IQ</span>
           {/if}
         </button>
       </div>

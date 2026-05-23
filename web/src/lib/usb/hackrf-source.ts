@@ -102,6 +102,7 @@ type DspRds = {
 };
 type DspAdsb = { kind: 'adsbFrames'; framesJson: string };
 type DspSquelch = { kind: 'squelch'; open: boolean };
+type DspIq = { kind: 'iq'; samples: Uint8Array; time: number };
 type DspErr = { kind: 'error'; message: string };
 type DspOutbound =
   | DspReady
@@ -111,10 +112,13 @@ type DspOutbound =
   | DspRds
   | DspAdsb
   | DspSquelch
+  | DspIq
   | DspErr;
 
 export type SquelchEvent = { open: boolean };
 export type SquelchCallback = (evt: SquelchEvent) => void;
+export type IqSamplesEvent = { samples: Uint8Array; time: number };
+export type IqSamplesCallback = (evt: IqSamplesEvent) => void;
 
 export class HackRfSource {
   private hrfWorker: Worker | null = null;
@@ -132,6 +136,7 @@ export class HackRfSource {
   private rdsListeners = new Set<RdsCallback>();
   private adsbListeners = new Set<AdsbFramesCallback>();
   private squelchListeners = new Set<SquelchCallback>();
+  private iqSamplesListeners = new Set<IqSamplesCallback>();
 
   async connect(): Promise<void> {
     if (this.device) return;
@@ -249,6 +254,11 @@ export class HackRfSource {
     this.dspWorker.postMessage({ kind: 'setAgc', on });
   }
 
+  setIqRecording(on: boolean): void {
+    if (!this.dspWorker) return;
+    this.dspWorker.postMessage({ kind: 'setIqRecording', on });
+  }
+
   /**
    * Push new per-stage gain values to the device without restarting the
    * stream. Each call applies all three stages even when only one changed
@@ -335,6 +345,13 @@ export class HackRfSource {
     };
   }
 
+  onIqSamples(cb: IqSamplesCallback): () => void {
+    this.iqSamplesListeners.add(cb);
+    return () => {
+      this.iqSamplesListeners.delete(cb);
+    };
+  }
+
   private spawnWorkers(): void {
     if (!this.hrfWorker) {
       this.hrfWorker = new Worker(new URL('../../workers/hackrf-worker.ts', import.meta.url), {
@@ -417,6 +434,11 @@ export class HackRfSource {
       case 'squelch':
         for (const cb of this.squelchListeners) {
           cb({ open: msg.open });
+        }
+        break;
+      case 'iq':
+        for (const cb of this.iqSamplesListeners) {
+          cb({ samples: msg.samples, time: msg.time });
         }
         break;
       case 'error':
