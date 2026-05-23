@@ -16,10 +16,16 @@
 import type { RtlCom } from '@jtarrio/webrtlsdr/rtlsdr/rtlcom.js';
 import type { Tuner } from '@jtarrio/webrtlsdr/rtlsdr/tuner.js';
 
-/** 7-bit I²C address of the E4000. The header uses 0xc8 (8-bit
- *  read/write encoding); the 7-bit form is half that. */
-const E4K_I2C_ADDR = 0x64;
-/** Identification register and expected value used to detect the chip. */
+/** I²C address of the E4000 in the same 8-bit form librtlsdr uses
+ *  (`#define E4K_I2C_ADDR 0xc8` in osmocom's tuner_e4k.h). The 7-bit
+ *  address is 0x64, but webrtlsdr's `setI2CReg(addr, …)` plumbs the
+ *  value straight into the RTL2832U's USB control message wValue —
+ *  the same path librtlsdr uses — so we have to match librtlsdr's
+ *  constant byte-for-byte. Passing the 7-bit form silently fails to
+ *  find the chip. */
+const E4K_I2C_ADDR = 0xc8;
+/** Identification register and expected value used to detect the chip
+ *  (also from tuner_e4k.h). */
 const E4K_CHECK_ADDR = 0x02;
 const E4K_CHECK_VAL = 0x40;
 /** Fractional divider denominator in the PLL math. */
