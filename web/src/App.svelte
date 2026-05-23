@@ -133,6 +133,13 @@
   // Setting the wrong region makes the high-end either harsh or muddy.
   let wfmDeemphUs = $state<50 | 75>(50);
 
+  // NFM / AM squelch threshold. The threshold is the post-channel-filter
+  // envelope magnitude in dBFS; -120 disables the gate. The UI slider
+  // exposes the useful range (-80..-10) plus a leftmost "off" stop.
+  let squelchEnabled = $state(false);
+  let squelchDb = $state(-40);
+  let squelchOpen = $state(true);
+
   let hrfInfo = $state<{
     boardName: string;
     firmwareVersion: string;
@@ -203,6 +210,7 @@
   let unsubCwText: (() => void) | null = null;
   let unsubRds: (() => void) | null = null;
   let unsubAdsb: (() => void) | null = null;
+  let unsubSquelch: (() => void) | null = null;
   let cwDecodedText = $state('');
   let cwDecodedWpm = $state(0);
 
@@ -251,6 +259,16 @@
       const savedDeemph = localStorage.getItem('moshon.wfmDeemphUs.v1');
       if (savedDeemph === '50' || savedDeemph === '75') {
         wfmDeemphUs = Number(savedDeemph) as 50 | 75;
+      }
+      const savedSquelch = localStorage.getItem('moshon.squelch.v1');
+      if (savedSquelch) {
+        try {
+          const s = JSON.parse(savedSquelch) as { enabled?: boolean; db?: number };
+          if (typeof s.enabled === 'boolean') squelchEnabled = s.enabled;
+          if (typeof s.db === 'number' && s.db >= -100 && s.db <= 0) squelchDb = s.db;
+        } catch {
+          // ignore malformed JSON
+        }
       }
     } catch {
       // localStorage unavailable — skip onboarding entirely rather than
@@ -356,6 +374,21 @@
     }
     if (rtlStatus === 'streaming') {
       activeSource().setDeemphasis(us);
+    }
+  });
+
+  // Persist + push squelch settings. -120 dBFS sentinel disables the gate
+  // in the demod; the UI slider sits between -80 and -10.
+  $effect(() => {
+    const enabled = squelchEnabled;
+    const db = squelchDb;
+    try {
+      localStorage.setItem('moshon.squelch.v1', JSON.stringify({ enabled, db }));
+    } catch {
+      // ignore
+    }
+    if (rtlStatus === 'streaming') {
+      activeSource().setSquelch(enabled ? db : -120);
     }
   });
 
@@ -483,6 +516,9 @@
         // Bad JSON from the worker — drop the batch.
       }
     });
+    unsubSquelch = src.onSquelch((evt) => {
+      squelchOpen = evt.open;
+    });
   }
 
   async function startAudio() {
@@ -510,6 +546,7 @@
     unsubCwText?.();
     unsubRds?.();
     unsubAdsb?.();
+    unsubSquelch?.();
     unsubStats = null;
     unsubFft = null;
     unsubAudio = null;
@@ -517,6 +554,7 @@
     unsubCwText = null;
     unsubRds = null;
     unsubAdsb = null;
+    unsubSquelch = null;
     // If a recording was in progress, save what we have.
     if (recorder.recording) recorder.stopAndDownload();
   }
@@ -609,6 +647,7 @@
         bandwidthHz: tuning.bandwidth,
         offsetHz: offsetEnabled ? offsetHz : 0,
         deemphasisUs: wfmDeemphUs,
+        squelchDb: squelchEnabled ? squelchDb : -120,
         audioRing: audio.ring!.buffer,
       };
       if (inputMode === 'hackrf') {
@@ -652,6 +691,7 @@
         bandwidthHz: tuning.bandwidth,
         offsetHz: offsetEnabled ? offsetHz : 0,
         deemphasisUs: wfmDeemphUs,
+        squelchDb: squelchEnabled ? squelchDb : -120,
         audioRing: audio.ring!.buffer,
       });
       rtlStatus = 'streaming';
@@ -1226,6 +1266,45 @@
             {Math.round(volume * 100)}%
           </span>
         </label>
+
+        <!-- Squelch (NFM/AM). Two-part control: enable toggle + threshold
+             slider. Indicator dot turns green when the gate is open. -->
+        {#if tuning.mode === 'nfm' || tuning.mode === 'am'}
+          <div
+            class="inline-flex items-center gap-2 rounded border border-neutral-700 px-2 py-1"
+            aria-label="Squelch"
+          >
+            <button
+              type="button"
+              onclick={() => (squelchEnabled = !squelchEnabled)}
+              class="text-[10px] uppercase cursor-pointer"
+              class:text-(--color-accent)={squelchEnabled}
+              class:text-neutral-500={!squelchEnabled}
+              aria-pressed={squelchEnabled}
+              title="Toggle squelch"
+            >SQ</button>
+            {#if squelchEnabled}
+              <span
+                class="inline-block w-1.5 h-1.5 rounded-full"
+                class:bg-emerald-400={squelchOpen}
+                class:bg-neutral-700={!squelchOpen}
+                title={squelchOpen ? 'gate open' : 'gate closed'}
+              ></span>
+              <input
+                type="range"
+                min="-80"
+                max="-10"
+                step="1"
+                bind:value={squelchDb}
+                class="w-24"
+                title="Squelch threshold (dBFS)"
+              />
+              <span class="text-[10px] text-neutral-400 tabular-nums w-10 text-right">
+                {squelchDb}dB
+              </span>
+            {/if}
+          </div>
+        {/if}
 
         <!-- WFM de-emphasis (mode-conditional). Europe is 50 µs, Americas
              is 75 µs. Live-applied to the running demod — no glitch. -->

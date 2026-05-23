@@ -36,6 +36,8 @@ export type StreamOptions = {
   offsetHz?: number;
   /** WFM audio de-emphasis time constant in microseconds (50 or 75). */
   deemphasisUs?: number;
+  /** Initial squelch threshold (dBFS) for NFM / AM. ≤ -120 disables. */
+  squelchDb?: number;
   audioRing: SharedArrayBuffer;
 };
 
@@ -98,6 +100,7 @@ type DspRds = {
   stereo: boolean;
 };
 type DspAdsb = { kind: 'adsbFrames'; framesJson: string };
+type DspSquelch = { kind: 'squelch'; open: boolean };
 type DspErr = { kind: 'error'; message: string };
 type DspOutbound =
   | DspReady
@@ -106,7 +109,11 @@ type DspOutbound =
   | DspCwText
   | DspRds
   | DspAdsb
+  | DspSquelch
   | DspErr;
+
+export type SquelchEvent = { open: boolean };
+export type SquelchCallback = (evt: SquelchEvent) => void;
 
 export class RtlTcpSource {
   private netWorker: Worker | null = null;
@@ -121,6 +128,7 @@ export class RtlTcpSource {
   private cwTextListeners = new Set<CwTextCallback>();
   private rdsListeners = new Set<RdsCallback>();
   private adsbListeners = new Set<AdsbFramesCallback>();
+  private squelchListeners = new Set<SquelchCallback>();
 
   /** Construct the WebSocket URL from a bridge base URL + optional target. */
   static buildWsUrl(bridgeUrl: string, rtlTcpTarget?: string): string {
@@ -164,6 +172,7 @@ export class RtlTcpSource {
       bandwidthHz: opts.bandwidthHz,
       sampleRate: opts.sampleRate,
       deemphasisUs: opts.deemphasisUs,
+      squelchDb: opts.squelchDb,
     });
 
     this.netWorker!.postMessage({
@@ -198,6 +207,12 @@ export class RtlTcpSource {
   setDeemphasis(us: number): void {
     if (!this.dspWorker) return;
     this.dspWorker.postMessage({ kind: 'setDeemphasis', us });
+  }
+
+  /** Squelch threshold in dBFS for NFM / AM. ≤ -120 to disable. */
+  setSquelch(db: number): void {
+    if (!this.dspWorker) return;
+    this.dspWorker.postMessage({ kind: 'setSquelch', db });
   }
 
   async stop(): Promise<void> {
@@ -259,6 +274,13 @@ export class RtlTcpSource {
     this.adsbListeners.add(cb);
     return () => {
       this.adsbListeners.delete(cb);
+    };
+  }
+
+  onSquelch(cb: SquelchCallback): () => void {
+    this.squelchListeners.add(cb);
+    return () => {
+      this.squelchListeners.delete(cb);
     };
   }
 
@@ -342,6 +364,11 @@ export class RtlTcpSource {
       case 'adsbFrames':
         for (const cb of this.adsbListeners) {
           cb({ framesJson: msg.framesJson });
+        }
+        break;
+      case 'squelch':
+        for (const cb of this.squelchListeners) {
+          cb({ open: msg.open });
         }
         break;
       case 'error':

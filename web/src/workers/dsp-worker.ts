@@ -43,23 +43,29 @@ type InboundInit = {
   /** WFM audio de-emphasis time constant in microseconds. 50 (ITU R1 /
    *  Europe) or 75 (Americas / Japan). Defaults to 50 if omitted. */
   deemphasisUs?: number;
+  /** Initial squelch threshold (dBFS) for NFM / AM. Pass -120 (or
+   *  omit) to disable. */
+  squelchDb?: number;
 };
 type InboundSetMode = { kind: 'setMode'; mode: DemodMode; bandwidthHz: number };
 type InboundStop = { kind: 'stop' };
 type InboundSetRecording = { kind: 'setRecording'; on: boolean };
 type InboundSetDeemphasis = { kind: 'setDeemphasis'; us: number };
+type InboundSetSquelch = { kind: 'setSquelch'; db: number };
 type Inbound =
   | InboundInit
   | InboundSetMode
   | InboundStop
   | InboundSetRecording
-  | InboundSetDeemphasis;
+  | InboundSetDeemphasis
+  | InboundSetSquelch;
 
 type OutboundReady = { kind: 'ready' };
 type OutboundFft = { kind: 'fft'; bins: Float32Array; time: number };
 type OutboundAudio = { kind: 'audio'; samples: Float32Array; time: number };
 type OutboundCwText = { kind: 'cwText'; text: string; wpm: number };
 type OutboundAdsb = { kind: 'adsbFrames'; framesJson: string };
+type OutboundSquelch = { kind: 'squelch'; open: boolean };
 type OutboundRds = {
   kind: 'rds';
   synced: boolean;
@@ -76,6 +82,7 @@ type Outbound =
   | OutboundCwText
   | OutboundAdsb
   | OutboundRds
+  | OutboundSquelch
   | OutboundError;
 
 type Demod = {
@@ -125,6 +132,9 @@ let currentBandwidth = 200_000;
 /** WFM audio de-emphasis time constant in microseconds. Applied at
  *  WfmDemod construction time. Default 50 (Europe). */
 let currentDeemphasisUs = 50;
+/** Squelch threshold in dBFS for NFM / AM. -120 (or any value ≤ that)
+ *  means the gate is disabled and audio always passes. */
+let currentSquelchDb = -120;
 let iqBufferForFft: Uint8Array | null = null;
 let running = false;
 let minPostIntervalMs = 33;
@@ -133,6 +143,10 @@ let recording = false;
 let cwDecoder: CwDecoder | null = null;
 let adsbDemod: AdsbDemod | null = null;
 let wfmDemodRef: WfmDemod | null = null;
+let nfmDemodRef: NfmDemod | null = null;
+let amDemodRef: AmDemod | null = null;
+let squelchTickerHandle: ReturnType<typeof setInterval> | null = null;
+let lastSquelchOpen: boolean | null = null;
 let rdsTickerHandle: ReturnType<typeof setInterval> | null = null;
 let lastRdsPi = -1;
 let lastRdsPs = '';
@@ -163,10 +177,18 @@ function buildDemod(mode: DemodMode, bandwidthHz: number, sampleRate: number): D
       wfmDemodRef = w;
       return w;
     }
-    case 'am':
-      return new AmDemod(sampleRate, bandwidthHz);
-    case 'nfm':
-      return new NfmDemod(sampleRate, bandwidthHz);
+    case 'am': {
+      const a = new AmDemod(sampleRate, bandwidthHz);
+      a.set_squelch_db(currentSquelchDb);
+      amDemodRef = a;
+      return a;
+    }
+    case 'nfm': {
+      const n = new NfmDemod(sampleRate, bandwidthHz);
+      n.set_squelch_db(currentSquelchDb);
+      nfmDemodRef = n;
+      return n;
+    }
     case 'usb':
       return new SsbDemod(sampleRate, bandwidthHz, false);
     case 'lsb':
@@ -193,6 +215,8 @@ const ADSB_NULL_DEMOD: Demod = {
 function rebuildDemod(mode: DemodMode, bandwidthHz: number) {
   demod?.free();
   if (mode !== 'wfm') wfmDemodRef = null;
+  if (mode !== 'nfm') nfmDemodRef = null;
+  if (mode !== 'am') amDemodRef = null;
   demod = buildDemod(mode, bandwidthHz, currentSampleRate);
   currentMode = mode;
   currentBandwidth = bandwidthHz;
@@ -214,6 +238,34 @@ function rebuildDemod(mode: DemodMode, bandwidthHz: number) {
   lastRdsSynced = false;
   lastRdsStereo = false;
   startOrStopRdsTicker();
+  startOrStopSquelchTicker();
+}
+
+function startOrStopSquelchTicker() {
+  // Poll the active demod's squelch state at 10 Hz while in NFM / AM
+  // mode. Only post when the state changes so we don't spam main.
+  const needsTicker =
+    (currentMode === 'nfm' && nfmDemodRef !== null) ||
+    (currentMode === 'am' && amDemodRef !== null);
+  if (needsTicker && !squelchTickerHandle) {
+    squelchTickerHandle = setInterval(() => {
+      const d = currentMode === 'nfm' ? nfmDemodRef : amDemodRef;
+      if (!d) return;
+      const open = d.is_squelch_open;
+      if (open !== lastSquelchOpen) {
+        lastSquelchOpen = open;
+        postOut({ kind: 'squelch', open });
+      }
+    }, 100);
+  } else if (!needsTicker && squelchTickerHandle) {
+    clearInterval(squelchTickerHandle);
+    squelchTickerHandle = null;
+    if (lastSquelchOpen !== null) {
+      lastSquelchOpen = null;
+      // Mode left NFM/AM: tell UI to drop the indicator.
+      postOut({ kind: 'squelch', open: true });
+    }
+  }
 }
 
 function startOrStopRdsTicker() {
@@ -274,6 +326,9 @@ async function setup(opts: InboundInit) {
     currentSampleRate = sr;
     if (typeof opts.deemphasisUs === 'number' && opts.deemphasisUs > 0) {
       currentDeemphasisUs = opts.deemphasisUs;
+    }
+    if (typeof opts.squelchDb === 'number') {
+      currentSquelchDb = opts.squelchDb;
     }
     fft = new FftContext(opts.fftSize);
     rebuildDemod(opts.mode, opts.bandwidthHz);
@@ -450,11 +505,22 @@ self.onmessage = (e: MessageEvent<Inbound>) => {
         if (wfmDemodRef) wfmDemodRef.set_deemphasis_us(msg.us);
       }
       break;
+    case 'setSquelch':
+      if (typeof msg.db === 'number') {
+        currentSquelchDb = msg.db;
+        if (nfmDemodRef) nfmDemodRef.set_squelch_db(msg.db);
+        if (amDemodRef) amDemodRef.set_squelch_db(msg.db);
+      }
+      break;
     case 'stop':
       running = false;
       if (rdsTickerHandle) {
         clearInterval(rdsTickerHandle);
         rdsTickerHandle = null;
+      }
+      if (squelchTickerHandle) {
+        clearInterval(squelchTickerHandle);
+        squelchTickerHandle = null;
       }
       break;
   }

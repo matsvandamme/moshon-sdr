@@ -1056,6 +1056,91 @@ const NFM_DEFAULT_DEVIATION: f32 = 5_000.0;
 /// bias), SSB (Weaver output asymmetry), and CW (BFO mixer leak).
 const DC_BLOCK_ALPHA: f32 = 0.995;
 
+/// Squelch envelope-tracking time constant at the 48 kHz audio rate.
+/// α = exp(-1 / (0.030 · 48 000)) ≈ 0.999 → ~30 ms smoothing — fast
+/// enough to catch short transmissions but slow enough to not chatter
+/// on noise spikes.
+const SQUELCH_ENV_ALPHA: f32 = 0.999;
+/// Sentinel threshold below which squelch is treated as disabled (always
+/// open). −120 dBFS is well below any plausible noise floor in the
+/// post-channel-filter envelope, so any signal above this is "louder
+/// than disabled" and gates the demod open.
+const SQUELCH_DISABLED_DB: f32 = -120.0;
+
+/// Single-pole envelope-based squelch with hysteresis. Tracks the
+/// magnitude of the post-channel-filter complex envelope and opens / closes
+/// the gate against a user-set threshold (in dBFS, where 0 dBFS = unit
+/// magnitude, i.e. full-scale carrier).
+struct Squelch {
+    /// Linear threshold to OPEN the gate (`= 10^((thr_db + hyst) / 20)`).
+    open_lin: f32,
+    /// Linear threshold to CLOSE the gate (`= 10^((thr_db - hyst) / 20)`).
+    close_lin: f32,
+    /// Smoothed envelope estimate.
+    env: f32,
+    /// Current gate state. True = pass audio, false = output zeros.
+    open: bool,
+    /// True iff squelch is effectively disabled (threshold well below
+    /// any plausible signal). Keeps the gate permanently open without
+    /// running the env tracker.
+    disabled: bool,
+}
+
+impl Squelch {
+    fn new() -> Self {
+        Self {
+            open_lin: 0.0,
+            close_lin: 0.0,
+            env: 0.0,
+            open: true,
+            disabled: true,
+        }
+    }
+
+    /// Configure the threshold in dBFS. ±2 dB of hysteresis is baked in
+    /// so a signal hovering right at the threshold doesn't chatter.
+    fn set_threshold_db(&mut self, db: f32) {
+        if db <= SQUELCH_DISABLED_DB {
+            self.disabled = true;
+            self.open = true;
+            return;
+        }
+        self.disabled = false;
+        let hyst_db = 2.0;
+        self.open_lin = 10f32.powf((db + hyst_db) * 0.05);
+        self.close_lin = 10f32.powf((db - hyst_db) * 0.05);
+    }
+
+    /// Update the envelope tracker with a new sample magnitude, then
+    /// return the gated audio sample. Caller passes the magnitude of
+    /// the post-filter complex envelope `|z|` AND the audio sample to
+    /// gate — kept separate so callers that already have |z| from
+    /// their main loop don't pay for it twice.
+    #[inline]
+    fn gate(&mut self, magnitude: f32, audio: f32) -> f32 {
+        if self.disabled {
+            return audio;
+        }
+        self.env = SQUELCH_ENV_ALPHA * self.env + (1.0 - SQUELCH_ENV_ALPHA) * magnitude;
+        if self.open {
+            if self.env < self.close_lin {
+                self.open = false;
+            }
+        } else if self.env > self.open_lin {
+            self.open = true;
+        }
+        if self.open {
+            audio
+        } else {
+            0.0
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        self.open
+    }
+}
+
 /// Single-pole DC-blocker. y[n] = x[n] − x[n−1] + α·y[n−1].
 struct DcBlock {
     x_prev: f32,
@@ -1128,6 +1213,8 @@ pub struct NfmDemod {
     /// audio sits on a small offset that the speaker treats as click on
     /// every retune.
     dc_block: DcBlock,
+    /// Envelope-based audio gate. Off (= permanently open) by default.
+    squelch: Squelch,
     iq_in: Vec<Complex<f32>>,
     iq_if: Vec<Complex<f32>>,
     iq_chan: Vec<Complex<f32>>,
@@ -1152,10 +1239,25 @@ impl NfmDemod {
             last_z: Complex { re: 1.0, im: 0.0 },
             audio_scale,
             dc_block: DcBlock::new(DC_BLOCK_ALPHA),
+            squelch: Squelch::new(),
             iq_in: Vec::with_capacity(65_536),
             iq_if: Vec::with_capacity(65_536 / if_decim + 16),
             iq_chan: Vec::with_capacity(65_536 / (if_decim * NARROW_AUDIO_DECIM) + 16),
         }
+    }
+
+    /// Set the squelch threshold in dBFS, where 0 dBFS = unit-magnitude
+    /// post-channel-filter envelope. Pass a value ≤ -120 to disable
+    /// (audio always passes). Typical useful range is -50..-10 dBFS.
+    pub fn set_squelch_db(&mut self, db: f32) {
+        self.squelch.set_threshold_db(db);
+    }
+
+    /// True when the squelch is currently open (audio passing).
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn is_squelch_open(&self) -> bool {
+        self.squelch.is_open()
     }
 
     #[must_use]
@@ -1172,7 +1274,9 @@ impl NfmDemod {
         for &z in &self.iq_chan {
             let prod = z * self.last_z.conj();
             let phase = prod.im.atan2(prod.re);
-            audio.push(self.dc_block.process(phase * self.audio_scale));
+            let raw = self.dc_block.process(phase * self.audio_scale);
+            let mag = (z.re * z.re + z.im * z.im).sqrt();
+            audio.push(self.squelch.gate(mag, raw));
             self.last_z = z;
         }
         audio
@@ -1195,6 +1299,8 @@ pub struct AmDemod {
     chan_decim: ComplexDecimator,
     /// Strips the (DC) carrier component from the envelope.
     dc_block: DcBlock,
+    /// Envelope-based audio gate. Off (= permanently open) by default.
+    squelch: Squelch,
     iq_in: Vec<Complex<f32>>,
     iq_if: Vec<Complex<f32>>,
     iq_chan: Vec<Complex<f32>>,
@@ -1212,10 +1318,23 @@ impl AmDemod {
             iq_decim: ComplexDecimator::new(if_decim, stage1),
             chan_decim: ComplexDecimator::new(NARROW_AUDIO_DECIM, stage2),
             dc_block: DcBlock::new(DC_BLOCK_ALPHA),
+            squelch: Squelch::new(),
             iq_in: Vec::with_capacity(65_536),
             iq_if: Vec::with_capacity(65_536 / if_decim + 16),
             iq_chan: Vec::with_capacity(65_536 / (if_decim * NARROW_AUDIO_DECIM) + 16),
         }
+    }
+
+    /// See `NfmDemod::set_squelch_db`. AM uses the same envelope-based
+    /// gate keyed off |z|.
+    pub fn set_squelch_db(&mut self, db: f32) {
+        self.squelch.set_threshold_db(db);
+    }
+
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn is_squelch_open(&self) -> bool {
+        self.squelch.is_open()
     }
 
     #[must_use]
@@ -1231,7 +1350,10 @@ impl AmDemod {
         let mut audio = Vec::with_capacity(self.iq_chan.len());
         for &z in &self.iq_chan {
             let env = (z.re * z.re + z.im * z.im).sqrt();
-            audio.push(self.dc_block.process(env));
+            let raw = self.dc_block.process(env);
+            // |z| is already the envelope used by the DC block; reuse it
+            // as the squelch input so we don't pay for another sqrt.
+            audio.push(self.squelch.gate(env, raw));
         }
         audio
     }
@@ -2214,6 +2336,43 @@ mod tests {
         assert!((a50 - expected_50).abs() < 1e-6, "α(50µs) = {a50}");
         assert!((a75 - expected_75).abs() < 1e-6, "α(75µs) = {a75}");
         assert!(a75 > a50, "75 µs should give a larger (slower) α");
+    }
+
+    /// Squelch must gate audio off when the smoothed envelope is below
+    /// threshold, and pass it through when it rises above the open
+    /// hysteresis point. We feed alternating quiet and loud bursts and
+    /// verify the gate transitions in the expected direction.
+    #[test]
+    fn squelch_gates_below_threshold() {
+        let mut sq = Squelch::new();
+        // Default: disabled — gate stays open regardless of input.
+        for _ in 0..100 {
+            let out = sq.gate(0.0, 1.0);
+            assert!((out - 1.0).abs() < 1e-6, "disabled squelch should pass");
+        }
+        assert!(sq.is_open());
+
+        // Set threshold at -30 dBFS (linear ≈ 0.0316). Anything below
+        // that should close the gate after the env tracker settles.
+        sq.set_threshold_db(-30.0);
+        // Drive a quiet signal (|z| = 0.001 → -60 dBFS) for ~100 ms.
+        for _ in 0..5_000 {
+            sq.gate(0.001, 1.0);
+        }
+        assert!(
+            !sq.is_open(),
+            "quiet signal should close squelch (env = {})",
+            sq.env
+        );
+        // Drive a strong signal (|z| = 0.3 → -10 dBFS) for ~200 ms.
+        for _ in 0..10_000 {
+            sq.gate(0.3, 1.0);
+        }
+        assert!(
+            sq.is_open(),
+            "strong signal should open squelch (env = {})",
+            sq.env
+        );
     }
 
     /// DC block must remove a constant offset (steady-state output → 0)

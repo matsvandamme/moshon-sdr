@@ -51,6 +51,8 @@ export type StreamOptions = {
   /** WFM audio de-emphasis time constant in microseconds. 50 (Europe)
    *  or 75 (Americas). Default 50. */
   deemphasisUs?: number;
+  /** Initial squelch threshold (dBFS) for NFM / AM. ≤ -120 disables. */
+  squelchDb?: number;
   audioRing: SharedArrayBuffer;
 };
 
@@ -97,6 +99,7 @@ type DspRds = {
   stereo: boolean;
 };
 type DspAdsb = { kind: 'adsbFrames'; framesJson: string };
+type DspSquelch = { kind: 'squelch'; open: boolean };
 type DspErr = { kind: 'error'; message: string };
 type DspOutbound =
   | DspReady
@@ -105,7 +108,11 @@ type DspOutbound =
   | DspCwText
   | DspRds
   | DspAdsb
+  | DspSquelch
   | DspErr;
+
+export type SquelchEvent = { open: boolean };
+export type SquelchCallback = (evt: SquelchEvent) => void;
 
 export class HackRfSource {
   private hrfWorker: Worker | null = null;
@@ -122,6 +129,7 @@ export class HackRfSource {
   private cwTextListeners = new Set<CwTextCallback>();
   private rdsListeners = new Set<RdsCallback>();
   private adsbListeners = new Set<AdsbFramesCallback>();
+  private squelchListeners = new Set<SquelchCallback>();
 
   async connect(): Promise<void> {
     if (this.device) return;
@@ -153,6 +161,7 @@ export class HackRfSource {
       bandwidthHz: opts.bandwidthHz,
       sampleRate: opts.sampleRate,
       deemphasisUs: opts.deemphasisUs,
+      squelchDb: opts.squelchDb,
     });
 
     this.hrfWorker!.postMessage({
@@ -223,6 +232,12 @@ export class HackRfSource {
   setDeemphasis(us: number): void {
     if (!this.dspWorker) return;
     this.dspWorker.postMessage({ kind: 'setDeemphasis', us });
+  }
+
+  /** Squelch threshold in dBFS for NFM / AM. ≤ -120 to disable. */
+  setSquelch(db: number): void {
+    if (!this.dspWorker) return;
+    this.dspWorker.postMessage({ kind: 'setSquelch', db });
   }
 
   /**
@@ -304,6 +319,13 @@ export class HackRfSource {
     };
   }
 
+  onSquelch(cb: SquelchCallback): () => void {
+    this.squelchListeners.add(cb);
+    return () => {
+      this.squelchListeners.delete(cb);
+    };
+  }
+
   private spawnWorkers(): void {
     if (!this.hrfWorker) {
       this.hrfWorker = new Worker(new URL('../../workers/hackrf-worker.ts', import.meta.url), {
@@ -381,6 +403,11 @@ export class HackRfSource {
       case 'adsbFrames':
         for (const cb of this.adsbListeners) {
           cb({ framesJson: msg.framesJson });
+        }
+        break;
+      case 'squelch':
+        for (const cb of this.squelchListeners) {
+          cb({ open: msg.open });
         }
         break;
       case 'error':

@@ -54,6 +54,9 @@ export type StreamOptions = {
   /** WFM audio de-emphasis time constant in microseconds. 50 (ITU R1 /
    *  Europe) or 75 (Americas / Japan). Default 50. */
   deemphasisUs?: number;
+  /** Initial squelch threshold (dBFS) for NFM / AM. Pass ≤ -120 to
+   *  disable. Default disabled. */
+  squelchDb?: number;
   /**
    * SharedArrayBuffer the DSP worker writes 48 kHz mono f32 PCM into,
    * to be consumed by an AudioWorklet on the main thread.
@@ -133,6 +136,7 @@ type DspRds = {
   stereo: boolean;
 };
 type DspAdsb = { kind: 'adsbFrames'; framesJson: string };
+type DspSquelch = { kind: 'squelch'; open: boolean };
 type DspErr = { kind: 'error'; message: string };
 type DspOutbound =
   | DspReady
@@ -141,7 +145,11 @@ type DspOutbound =
   | DspCwText
   | DspRds
   | DspAdsb
+  | DspSquelch
   | DspErr;
+
+export type SquelchEvent = { open: boolean };
+export type SquelchCallback = (evt: SquelchEvent) => void;
 
 export class RtlSdrSource {
   private usbWorker: Worker | null = null;
@@ -158,6 +166,7 @@ export class RtlSdrSource {
   private cwTextListeners = new Set<CwTextCallback>();
   private rdsListeners = new Set<RdsCallback>();
   private adsbListeners = new Set<AdsbFramesCallback>();
+  private squelchListeners = new Set<SquelchCallback>();
 
   /**
    * Opens a device via the WebUSB picker. Must be called inside a user-gesture
@@ -199,6 +208,7 @@ export class RtlSdrSource {
       bandwidthHz: opts.bandwidthHz,
       sampleRate: opts.sampleRate,
       deemphasisUs: opts.deemphasisUs,
+      squelchDb: opts.squelchDb,
     });
 
     this.usbWorker!.postMessage({
@@ -276,6 +286,12 @@ export class RtlSdrSource {
     this.dspWorker.postMessage({ kind: 'setDeemphasis', us });
   }
 
+  /** Squelch threshold in dBFS for NFM / AM. Pass ≤ -120 to disable. */
+  setSquelch(db: number): void {
+    if (!this.dspWorker) return;
+    this.dspWorker.postMessage({ kind: 'setSquelch', db });
+  }
+
   /** Stops streaming. Device remains permitted but the workers shut down. */
   async stop(): Promise<void> {
     if (!this.usbWorker) return;
@@ -343,6 +359,13 @@ export class RtlSdrSource {
     this.adsbListeners.add(cb);
     return () => {
       this.adsbListeners.delete(cb);
+    };
+  }
+
+  onSquelch(cb: SquelchCallback): () => void {
+    this.squelchListeners.add(cb);
+    return () => {
+      this.squelchListeners.delete(cb);
     };
   }
 
@@ -427,6 +450,11 @@ export class RtlSdrSource {
       case 'adsbFrames':
         for (const cb of this.adsbListeners) {
           cb({ framesJson: msg.framesJson });
+        }
+        break;
+      case 'squelch':
+        for (const cb of this.squelchListeners) {
+          cb({ open: msg.open });
         }
         break;
       case 'error':
