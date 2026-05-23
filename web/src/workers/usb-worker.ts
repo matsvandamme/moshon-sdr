@@ -12,10 +12,11 @@
  * for the live counter UI.
  */
 
-import { RTL2832U, type RtlDevice, type SampleBlock } from '@jtarrio/webrtlsdr/rtlsdr.js';
+import type { RtlDevice, SampleBlock } from '@jtarrio/webrtlsdr/rtlsdr.js';
 import { DirectSampling } from '@jtarrio/webrtlsdr/rtlsdr.js';
 import { SabRing } from '../lib/ring/sab-ring';
 import { NcoShifter } from '../lib/usb/nco-shift';
+import { openRtl2832U } from '../lib/usb/rtl2832u-open';
 
 export type DirectSamplingMode = 'off' | 'i' | 'q';
 
@@ -124,7 +125,7 @@ async function init(opts: InboundInit) {
     nco.configure(currentOffsetHz, currentSampleRate);
 
     await usbDevice.open();
-    device = await RTL2832U.open(usbDevice);
+    device = await openRtl2832U(usbDevice);
     // Apply advanced settings BEFORE sample rate / frequency so the
     // first read isn't on a half-configured device.
     if (typeof opts.ppmCorrection === 'number') {
