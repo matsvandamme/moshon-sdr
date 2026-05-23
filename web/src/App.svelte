@@ -52,10 +52,28 @@
   let wasmError = $state<string | null>(null);
   let smokeResult = $state<number | null>(null);
 
-  // ---- RTL-SDR fixed config ----
-  const SAMPLE_RATE = 2_400_000;
+  // ---- IQ stream config ----
+  // Sample rate is picked at connect time and held for the session. Valid
+  // values depend on the dongle: RTL-SDR supports up to ~3.2 MS/s, HackRF
+  // supports 2-20 MS/s. We expose a clean subset that produces a usable
+  // demod chain (input_rate / 240k must be a sensible integer).
+  let sampleRate = $state(2_400_000);
   const FFT_SIZE = 2048;
   const FFT_RATE_HZ = 30;
+
+  const RTL_SAMPLE_RATES = [
+    { value: 1_920_000, label: '1.92 MS/s' },
+    { value: 2_400_000, label: '2.4 MS/s (default)' },
+    { value: 2_880_000, label: '2.88 MS/s' },
+  ];
+  const HACKRF_SAMPLE_RATES = [
+    { value: 2_400_000, label: '2.4 MS/s (default)' },
+    { value: 4_800_000, label: '4.8 MS/s' },
+    { value: 9_600_000, label: '9.6 MS/s' },
+  ];
+  // Derived below, after `inputMode` is declared. Forward declaration via
+  // function so the $derived expression sees inputMode when it evaluates.
+  let availableSampleRates = $state<{ value: number; label: string }[]>(RTL_SAMPLE_RATES);
 
   // Three sources: RTL-SDR via WebUSB, HackRF One via WebUSB, and
   // rtl_tcp-over-WebSocket (remote bridge). They all expose the same
@@ -100,6 +118,16 @@
     if (inputMode === 'network') return netSource;
     return usbSource;
   }
+
+  // Keep the sample-rate options in sync with the selected source. If the
+  // user flips RTL ↔ HackRF and the current rate isn't valid for the new
+  // source, snap to that source's default (2.4 MS/s).
+  $effect(() => {
+    availableSampleRates = inputMode === 'hackrf' ? HACKRF_SAMPLE_RATES : RTL_SAMPLE_RATES;
+    if (!availableSampleRates.some((r) => r.value === sampleRate)) {
+      sampleRate = 2_400_000;
+    }
+  });
 
   const audio = new AudioPipeline();
   let volume = $state(0.6);
@@ -512,7 +540,7 @@
       await startAudio();
       rtlStatus = 'streaming';
       const baseOpts = {
-        sampleRate: SAMPLE_RATE,
+        sampleRate,
         centerFreq: tuning.centerFreq,
         gain: tuning.gain,
         fftSize: FFT_SIZE,
@@ -554,7 +582,7 @@
       await netSource.start({
         bridgeUrl,
         rtlTcpTarget: rtlTcpTarget.trim() || undefined,
-        sampleRate: SAMPLE_RATE,
+        sampleRate,
         centerFreq: tuning.centerFreq,
         gain: tuning.gain,
         fftSize: FFT_SIZE,
@@ -708,7 +736,7 @@
   // on every FFT frame via the latestBins reactive dep.
   let signalDb = $derived(
     latestBins
-      ? peakDbInChannel(latestBins, SAMPLE_RATE, tuning.bandwidth)
+      ? peakDbInChannel(latestBins, sampleRate, tuning.bandwidth)
       : Number.NEGATIVE_INFINITY,
   );
   let signalS = $derived(dbToSUnit(signalDb));
@@ -850,6 +878,24 @@
         </button>
       </div>
 
+      <!-- Sample-rate picker. Held for the session — switching requires
+           reconnect because every demod's decimation factor changes with
+           the input rate. -->
+      <label class="flex items-center gap-3 mb-4 text-xs font-mono">
+        <span class="text-neutral-500 uppercase text-[10px]">Rate</span>
+        <select
+          bind:value={sampleRate}
+          class="rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-neutral-200"
+        >
+          {#each availableSampleRates as r (r.value)}
+            <option value={r.value}>{r.label}</option>
+          {/each}
+        </select>
+        <span class="text-neutral-600 text-[10px]">
+          higher = wider spectrum, more CPU. Switching requires reconnect.
+        </span>
+      </label>
+
       {#if inputMode === 'usb'}
         <p class="text-sm text-neutral-400 mb-4">
           Plug in an RTL-SDR Blog v3/v4 dongle and click Connect.
@@ -926,7 +972,7 @@
         <SpectrumWaterfall
           bins={latestBins}
           centerFreq={tuning.centerFreq}
-          sampleRate={SAMPLE_RATE}
+          sampleRate={sampleRate}
           {dbMin}
           {dbMax}
           {colormap}
@@ -1149,6 +1195,13 @@
           Advanced
         </summary>
         <div class="p-3 border-t border-neutral-800 space-y-3">
+          <!-- Read-only sample-rate readout while streaming. Set before
+               connect via the dropdown in the connect section above. -->
+          <div class="text-[11px] text-neutral-500">
+            Sample rate: <span class="text-neutral-300">{(sampleRate / 1e6).toFixed(2)} MS/s</span>
+            <span class="text-neutral-600 ml-2">(locked while streaming)</span>
+          </div>
+
           <!-- Offset tuning (universal). -->
           <div>
             <label class="flex items-center gap-2 mb-1.5">

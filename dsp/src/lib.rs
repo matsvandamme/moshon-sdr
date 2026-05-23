@@ -344,7 +344,10 @@ const WFM_IF_RATE: f32 = 240_000.0;
 /// scale factor and filter cutoff stay in sync with it.
 #[allow(dead_code)]
 const AUDIO_RATE: f32 = 48_000.0;
-/// First-stage decimation factor: 2.4 MS/s → 240 kS/s (= 10).
+/// Default first-stage decimation factor at the canonical 2.4 MS/s input
+/// rate. Kept for test convenience; runtime code computes `if_decim` from
+/// the actual input sample rate.
+#[allow(dead_code)]
 const WFM_IF_DECIM: usize = 10;
 /// Second-stage decimation factor: 240 kS/s → 48 kS/s (= 5).
 const WFM_AUDIO_DECIM: usize = 5;
@@ -768,12 +771,19 @@ pub struct WfmDemod {
 
 #[wasm_bindgen]
 impl WfmDemod {
+    /// Construct a WFM demodulator for the given input IQ sample rate.
+    /// Supported rates: any integer multiple of `WFM_IF_RATE` (240 kHz)
+    /// that the dongle can actually deliver — e.g. 1.92, 2.4, 2.88, 4.8,
+    /// 9.6 MS/s. Non-integer ratios round to the nearest integer; the IF
+    /// rate may then drift slightly from 240 kHz (acceptable for ear).
     #[wasm_bindgen(constructor)]
     #[must_use]
-    pub fn new() -> WfmDemod {
-        // First stage: 31-tap LPF with cutoff at ~100 kHz / 2.4 MHz = 0.042.
-        // Pass band covers the full WFM signal (±100 kHz around DC after mixing).
-        let iq_taps = lowpass_taps(31, 0.042);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn new(input_rate_hz: f32) -> WfmDemod {
+        let if_decim = ((input_rate_hz / WFM_IF_RATE).round() as usize).max(1);
+        // First stage: 31-tap LPF with ~100 kHz cutoff at the input rate.
+        // Pass band covers the full WFM signal (±100 kHz around DC).
+        let iq_taps = lowpass_taps(31, 100_000.0 / input_rate_hz);
         // Audio stage: 47-tap LPF with cutoff at 15 kHz / 240 kHz = 0.0625.
         // Pass band covers the broadcast-FM mono audio (50 Hz – 15 kHz). We
         // build TWO independent decimators so the sum (L+R) and difference
@@ -787,7 +797,7 @@ impl WfmDemod {
         let deemph_alpha = (-1.0 / (WFM_DEEMPH_TAU_S * AUDIO_RATE)).exp();
 
         WfmDemod {
-            iq_decim: ComplexDecimator::new(WFM_IF_DECIM, iq_taps),
+            iq_decim: ComplexDecimator::new(if_decim, iq_taps),
             sum_decim: RealDecimator::new(WFM_AUDIO_DECIM, audio_taps_sum),
             diff_decim: RealDecimator::new(WFM_AUDIO_DECIM, audio_taps_diff),
             last_z: Complex { re: 1.0, im: 0.0 },
@@ -807,12 +817,12 @@ impl WfmDemod {
             rds: RdsDecoder::new(WFM_IF_RATE),
 
             iq_in: Vec::with_capacity(65_536),
-            iq_if: Vec::with_capacity(65_536 / WFM_IF_DECIM + 16),
-            mpx: Vec::with_capacity(65_536 / WFM_IF_DECIM + 16),
-            diff_mix: Vec::with_capacity(65_536 / WFM_IF_DECIM + 16),
-            sum_audio: Vec::with_capacity(65_536 / (WFM_IF_DECIM * WFM_AUDIO_DECIM) + 16),
-            diff_audio: Vec::with_capacity(65_536 / (WFM_IF_DECIM * WFM_AUDIO_DECIM) + 16),
-            output: Vec::with_capacity(2 * (65_536 / (WFM_IF_DECIM * WFM_AUDIO_DECIM) + 16)),
+            iq_if: Vec::with_capacity(65_536 / if_decim + 16),
+            mpx: Vec::with_capacity(65_536 / if_decim + 16),
+            diff_mix: Vec::with_capacity(65_536 / if_decim + 16),
+            sum_audio: Vec::with_capacity(65_536 / (if_decim * WFM_AUDIO_DECIM) + 16),
+            diff_audio: Vec::with_capacity(65_536 / (if_decim * WFM_AUDIO_DECIM) + 16),
+            output: Vec::with_capacity(2 * (65_536 / (if_decim * WFM_AUDIO_DECIM) + 16)),
         }
     }
 
@@ -995,7 +1005,7 @@ impl WfmDemod {
 
 impl Default for WfmDemod {
     fn default() -> Self {
-        Self::new()
+        Self::new(WFM_INPUT_RATE)
     }
 }
 
@@ -1009,9 +1019,14 @@ impl Default for WfmDemod {
 // 240 kS/s → 48 kS/s. After stage 2 the IQ is at audio rate and we apply
 // either an FM discriminator (NFM) or an envelope detector + DC block (AM).
 
-/// Stage-1 decimation factor for the narrow demods: 2.4 MS/s → 240 kS/s.
+/// Default stage-1 decimation factor at 2.4 MS/s input. The runtime
+/// computes the real `if_decim` from the configured input rate; this
+/// constant is kept for back-compat / tests only.
+#[allow(dead_code)]
 const NARROW_IF_DECIM: usize = 10;
-/// Stage-1 sample rate after the wide anti-alias filter.
+/// Target stage-1 sample rate after the wide anti-alias filter. Constant
+/// across input rates because the downstream biquads (pilot/RDS/etc.) and
+/// audio decimator are all tuned to this.
 const NARROW_IF_RATE: f32 = 240_000.0;
 /// Stage-2 decimation factor: 240 kS/s → 48 kS/s.
 const NARROW_AUDIO_DECIM: usize = 5;
@@ -1024,10 +1039,16 @@ const AM_DC_ALPHA: f32 = 0.995;
 const NARROW_BW_MIN: f32 = 1_500.0;
 const NARROW_BW_MAX: f32 = NARROW_IF_RATE * 0.4;
 
-fn build_stage1_iq_taps() -> Vec<f32> {
-    // Same as WFM's first stage — wide enough that the channel filter does
-    // the real selectivity job downstream.
-    lowpass_taps(31, 0.042)
+fn build_stage1_iq_taps(input_rate_hz: f32) -> Vec<f32> {
+    // Same as WFM's first stage — ~100 kHz cutoff normalized to the input
+    // sample rate, wide enough that the channel filter does the real
+    // selectivity job downstream.
+    lowpass_taps(31, 100_000.0 / input_rate_hz)
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn narrow_if_decim(input_rate_hz: f32) -> usize {
+    ((input_rate_hz / NARROW_IF_RATE).round() as usize).max(1)
 }
 
 fn build_stage2_iq_taps(bandwidth_hz: f32) -> Vec<f32> {
@@ -1065,8 +1086,9 @@ pub struct NfmDemod {
 impl NfmDemod {
     #[wasm_bindgen(constructor)]
     #[must_use]
-    pub fn new(bandwidth_hz: f32) -> NfmDemod {
-        let stage1 = build_stage1_iq_taps();
+    pub fn new(input_rate_hz: f32, bandwidth_hz: f32) -> NfmDemod {
+        let if_decim = narrow_if_decim(input_rate_hz);
+        let stage1 = build_stage1_iq_taps(input_rate_hz);
         let stage2 = build_stage2_iq_taps(bandwidth_hz);
         // Scale: with peak deviation `f_dev` and output sample rate `f_s`, peak
         // phase change per sample is `2π·f_dev/f_s`. Choosing scale = f_s /
@@ -1074,13 +1096,13 @@ impl NfmDemod {
         // the WFM convention.
         let audio_scale = AUDIO_RATE / (PI * NFM_DEFAULT_DEVIATION);
         NfmDemod {
-            iq_decim: ComplexDecimator::new(NARROW_IF_DECIM, stage1),
+            iq_decim: ComplexDecimator::new(if_decim, stage1),
             chan_decim: ComplexDecimator::new(NARROW_AUDIO_DECIM, stage2),
             last_z: Complex { re: 1.0, im: 0.0 },
             audio_scale,
             iq_in: Vec::with_capacity(65_536),
-            iq_if: Vec::with_capacity(65_536 / NARROW_IF_DECIM + 16),
-            iq_chan: Vec::with_capacity(65_536 / (NARROW_IF_DECIM * NARROW_AUDIO_DECIM) + 16),
+            iq_if: Vec::with_capacity(65_536 / if_decim + 16),
+            iq_chan: Vec::with_capacity(65_536 / (if_decim * NARROW_AUDIO_DECIM) + 16),
         }
     }
 
@@ -1107,7 +1129,7 @@ impl NfmDemod {
 
 impl Default for NfmDemod {
     fn default() -> Self {
-        Self::new(12_500.0)
+        Self::new(WFM_INPUT_RATE, 12_500.0)
     }
 }
 
@@ -1131,17 +1153,18 @@ pub struct AmDemod {
 impl AmDemod {
     #[wasm_bindgen(constructor)]
     #[must_use]
-    pub fn new(bandwidth_hz: f32) -> AmDemod {
-        let stage1 = build_stage1_iq_taps();
+    pub fn new(input_rate_hz: f32, bandwidth_hz: f32) -> AmDemod {
+        let if_decim = narrow_if_decim(input_rate_hz);
+        let stage1 = build_stage1_iq_taps(input_rate_hz);
         let stage2 = build_stage2_iq_taps(bandwidth_hz);
         AmDemod {
-            iq_decim: ComplexDecimator::new(NARROW_IF_DECIM, stage1),
+            iq_decim: ComplexDecimator::new(if_decim, stage1),
             chan_decim: ComplexDecimator::new(NARROW_AUDIO_DECIM, stage2),
             dc_x_prev: 0.0,
             dc_y_prev: 0.0,
             iq_in: Vec::with_capacity(65_536),
-            iq_if: Vec::with_capacity(65_536 / NARROW_IF_DECIM + 16),
-            iq_chan: Vec::with_capacity(65_536 / (NARROW_IF_DECIM * NARROW_AUDIO_DECIM) + 16),
+            iq_if: Vec::with_capacity(65_536 / if_decim + 16),
+            iq_chan: Vec::with_capacity(65_536 / (if_decim * NARROW_AUDIO_DECIM) + 16),
         }
     }
 
@@ -1170,7 +1193,7 @@ impl AmDemod {
 
 impl Default for AmDemod {
     fn default() -> Self {
-        Self::new(9_000.0)
+        Self::new(WFM_INPUT_RATE, 9_000.0)
     }
 }
 
@@ -1219,9 +1242,10 @@ pub struct SsbDemod {
 impl SsbDemod {
     #[wasm_bindgen(constructor)]
     #[must_use]
-    pub fn new(bandwidth_hz: f32, lsb: bool) -> SsbDemod {
+    pub fn new(input_rate_hz: f32, bandwidth_hz: f32, lsb: bool) -> SsbDemod {
+        let if_decim = narrow_if_decim(input_rate_hz);
         let bw = bandwidth_hz.clamp(SSB_BW_MIN, NARROW_BW_MAX);
-        let stage1 = build_stage1_iq_taps();
+        let stage1 = build_stage1_iq_taps(input_rate_hz);
         // Stage 2 cutoff = full audio width (not half) — we want both sidebands
         // at this point; the Weaver LPF downstream picks one.
         let stage2 = lowpass_taps(63, bw / NARROW_IF_RATE);
@@ -1230,15 +1254,15 @@ impl SsbDemod {
         let nco_step = 2.0 * PI * (bw / 2.0) / AUDIO_RATE;
         let sideband_sign = if lsb { -1.0 } else { 1.0 };
         SsbDemod {
-            iq_decim: ComplexDecimator::new(NARROW_IF_DECIM, stage1),
+            iq_decim: ComplexDecimator::new(if_decim, stage1),
             chan_decim: ComplexDecimator::new(NARROW_AUDIO_DECIM, stage2),
             nco_phase: 0.0,
             nco_step,
             sideband_sign,
             weaver_lpf: ComplexFir::new(weaver_taps),
             iq_in: Vec::with_capacity(65_536),
-            iq_if: Vec::with_capacity(65_536 / NARROW_IF_DECIM + 16),
-            iq_chan: Vec::with_capacity(65_536 / (NARROW_IF_DECIM * NARROW_AUDIO_DECIM) + 16),
+            iq_if: Vec::with_capacity(65_536 / if_decim + 16),
+            iq_chan: Vec::with_capacity(65_536 / (if_decim * NARROW_AUDIO_DECIM) + 16),
         }
     }
 
@@ -1282,7 +1306,7 @@ impl SsbDemod {
 
 impl Default for SsbDemod {
     fn default() -> Self {
-        Self::new(SSB_DEFAULT_BW, false)
+        Self::new(WFM_INPUT_RATE, SSB_DEFAULT_BW, false)
     }
 }
 
@@ -1321,21 +1345,22 @@ pub struct CwDemod {
 impl CwDemod {
     #[wasm_bindgen(constructor)]
     #[must_use]
-    pub fn new(bandwidth_hz: f32) -> CwDemod {
+    pub fn new(input_rate_hz: f32, bandwidth_hz: f32) -> CwDemod {
+        let if_decim = narrow_if_decim(input_rate_hz);
         let bw = bandwidth_hz.clamp(CW_BW_MIN, NARROW_BW_MAX);
-        let stage1 = build_stage1_iq_taps();
+        let stage1 = build_stage1_iq_taps(input_rate_hz);
         // Narrow CW filtering wants a long FIR — 127 taps at a low cutoff
         // gives a usable rolloff without becoming the dominant cost.
         let stage2 = lowpass_taps(127, (bw / 2.0) / NARROW_IF_RATE);
         let bfo_step = 2.0 * PI * CW_BFO_HZ / AUDIO_RATE;
         CwDemod {
-            iq_decim: ComplexDecimator::new(NARROW_IF_DECIM, stage1),
+            iq_decim: ComplexDecimator::new(if_decim, stage1),
             chan_decim: ComplexDecimator::new(NARROW_AUDIO_DECIM, stage2),
             bfo_phase: 0.0,
             bfo_step,
             iq_in: Vec::with_capacity(65_536),
-            iq_if: Vec::with_capacity(65_536 / NARROW_IF_DECIM + 16),
-            iq_chan: Vec::with_capacity(65_536 / (NARROW_IF_DECIM * NARROW_AUDIO_DECIM) + 16),
+            iq_if: Vec::with_capacity(65_536 / if_decim + 16),
+            iq_chan: Vec::with_capacity(65_536 / (if_decim * NARROW_AUDIO_DECIM) + 16),
         }
     }
 
@@ -1365,7 +1390,7 @@ impl CwDemod {
 
 impl Default for CwDemod {
     fn default() -> Self {
-        Self::new(CW_DEFAULT_BW)
+        Self::new(WFM_INPUT_RATE, CW_DEFAULT_BW)
     }
 }
 
@@ -1747,7 +1772,7 @@ mod tests {
             iq[2 * n + 1] = f32_to_u8(amp * phase.sin() + 127.5);
         }
 
-        let mut demod = WfmDemod::new();
+        let mut demod = WfmDemod::new(WFM_INPUT_RATE);
         let audio = demod.process(&iq);
 
         // Output is interleaved stereo (L, R, L, R, ...) at 48 kHz, so the
@@ -1811,7 +1836,7 @@ mod tests {
             iq[2 * n + 1] = f32_to_u8(amp * phase.sin() + 127.5);
         }
 
-        let mut demod = WfmDemod::new();
+        let mut demod = WfmDemod::new(WFM_INPUT_RATE);
         // Warm-up pass for biquad/decimator transients to settle.
         let _ = demod.process(&iq);
         let audio = demod.process(&iq);
@@ -1852,7 +1877,7 @@ mod tests {
             iq[2 * n + 1] = f32_to_u8(amp * phase.sin() + 127.5);
         }
 
-        let mut demod = NfmDemod::new(12_500.0);
+        let mut demod = NfmDemod::new(WFM_INPUT_RATE, 12_500.0);
         // First pass warms the channel filter + discriminator state. During
         // the filter transient atan2 output can swing the full ±π and we
         // want a settled signal before checking peak amplitude.
@@ -1893,7 +1918,7 @@ mod tests {
             iq[2 * n + 1] = f32_to_u8(127.5);
         }
 
-        let mut demod = AmDemod::new(9_000.0);
+        let mut demod = AmDemod::new(WFM_INPUT_RATE, 9_000.0);
         // Warm the DC block + filter history with a first pass; the first
         // few hundred samples carry the carrier step.
         let _ = demod.process(&iq);
@@ -1937,11 +1962,11 @@ mod tests {
             iq[2 * n + 1] = f32_to_u8(amp * phase.sin() + 127.5);
         }
 
-        let mut usb = SsbDemod::new(2_400.0, false);
+        let mut usb = SsbDemod::new(WFM_INPUT_RATE, 2_400.0, false);
         let _ = usb.process(&iq);
         let audio_usb = usb.process(&iq);
 
-        let mut lsb = SsbDemod::new(2_400.0, true);
+        let mut lsb = SsbDemod::new(WFM_INPUT_RATE, 2_400.0, true);
         let _ = lsb.process(&iq);
         let audio_lsb = lsb.process(&iq);
 
@@ -1977,9 +2002,7 @@ mod tests {
         assert_eq!(bytes.len(), 14);
         let crc = mode_s_crc24(&bytes, 112);
         assert_eq!(crc, 0, "CRC syndrome should be 0 on a valid DF17 frame");
-        let icao = (u32::from(bytes[1]) << 16)
-            | (u32::from(bytes[2]) << 8)
-            | u32::from(bytes[3]);
+        let icao = (u32::from(bytes[1]) << 16) | (u32::from(bytes[2]) << 8) | u32::from(bytes[3]);
         assert_eq!(icao, 0x0048_40D6);
     }
 
@@ -2092,7 +2115,7 @@ mod tests {
             iq[2 * n + 1] = f32_to_u8(127.5);
         }
 
-        let mut demod = CwDemod::new(500.0);
+        let mut demod = CwDemod::new(WFM_INPUT_RATE, 500.0);
         let _ = demod.process(&iq); // warm-up
         let audio = demod.process(&iq);
 

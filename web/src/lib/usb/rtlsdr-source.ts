@@ -194,6 +194,7 @@ export class RtlSdrSource {
       postRateHz: fftRateHz,
       mode: opts.mode,
       bandwidthHz: opts.bandwidthHz,
+      sampleRate: opts.sampleRate,
     });
 
     this.usbWorker!.postMessage({

@@ -37,6 +37,9 @@ type InboundInit = {
   postRateHz: number;
   mode: DemodMode;
   bandwidthHz: number;
+  /** IQ sample rate the demods should configure for. Required field;
+   *  defaulting hides bugs when the source forgets to pass it. */
+  sampleRate: number;
 };
 type InboundSetMode = { kind: 'setMode'; mode: DemodMode; bandwidthHz: number };
 type InboundStop = { kind: 'stop' };
@@ -91,6 +94,7 @@ let audioRing: SabRing | null = null;
 let fft: FftContext | null = null;
 let demod: Demod | null = null;
 let currentMode: DemodMode = 'wfm';
+let currentSampleRate = 2_400_000;
 let currentBandwidth = 200_000;
 let iqBufferForFft: Uint8Array | null = null;
 let running = false;
@@ -122,30 +126,30 @@ function maybeTapForRecording(stereo: Float32Array) {
   postOut({ kind: 'audio', samples: copy, time: performance.now() }, [copy.buffer]);
 }
 
-function buildDemod(mode: DemodMode, bandwidthHz: number): Demod {
+function buildDemod(mode: DemodMode, bandwidthHz: number, sampleRate: number): Demod {
   switch (mode) {
     case 'wfm': {
-      const w = new WfmDemod();
+      const w = new WfmDemod(sampleRate);
       wfmDemodRef = w;
       return w;
     }
     case 'am':
-      return new AmDemod(bandwidthHz);
+      return new AmDemod(sampleRate, bandwidthHz);
     case 'nfm':
-      return new NfmDemod(bandwidthHz);
+      return new NfmDemod(sampleRate, bandwidthHz);
     case 'usb':
-      return new SsbDemod(bandwidthHz, false);
+      return new SsbDemod(sampleRate, bandwidthHz, false);
     case 'lsb':
-      return new SsbDemod(bandwidthHz, true);
+      return new SsbDemod(sampleRate, bandwidthHz, true);
     case 'cw':
-      return new CwDemod(bandwidthHz);
+      return new CwDemod(sampleRate, bandwidthHz);
     case 'adsb':
     case 'lora':
       // Neither ADS-B nor LoRa uses the audio demod path — the loop
       // branches above. Return a sentinel that's never called.
       return ADSB_NULL_DEMOD;
     default:
-      return new WfmDemod();
+      return new WfmDemod(sampleRate);
   }
 }
 
@@ -159,7 +163,7 @@ const ADSB_NULL_DEMOD: Demod = {
 function rebuildDemod(mode: DemodMode, bandwidthHz: number) {
   demod?.free();
   if (mode !== 'wfm') wfmDemodRef = null;
-  demod = buildDemod(mode, bandwidthHz);
+  demod = buildDemod(mode, bandwidthHz, currentSampleRate);
   currentMode = mode;
   currentBandwidth = bandwidthHz;
   // Reset the CW decoder state on mode change so leftover patterns from a
@@ -168,7 +172,7 @@ function rebuildDemod(mode: DemodMode, bandwidthHz: number) {
   // (Re)create ADS-B decoder only when entering ADS-B mode.
   if (mode === 'adsb') {
     adsbDemod?.free();
-    adsbDemod = new AdsbDemod(2_400_000);
+    adsbDemod = new AdsbDemod(currentSampleRate);
   } else if (adsbDemod) {
     adsbDemod.free();
     adsbDemod = null;
@@ -233,6 +237,7 @@ function maybeDecodeCw(mono: Float32Array) {
 async function setup(opts: InboundInit) {
   try {
     await init();
+    currentSampleRate = opts.sampleRate;
     fft = new FftContext(opts.fftSize);
     rebuildDemod(opts.mode, opts.bandwidthHz);
     iqRing = new SabRing(opts.iqRing);

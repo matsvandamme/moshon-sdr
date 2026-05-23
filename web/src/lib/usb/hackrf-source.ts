@@ -139,6 +139,7 @@ export class HackRfSource {
       postRateHz: fftRateHz,
       mode: opts.mode,
       bandwidthHz: opts.bandwidthHz,
+      sampleRate: opts.sampleRate,
     });
 
     this.hrfWorker!.postMessage({

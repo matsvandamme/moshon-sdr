@@ -160,6 +160,7 @@ export class RtlTcpSource {
       postRateHz: fftRateHz,
       mode: opts.mode,
       bandwidthHz: opts.bandwidthHz,
+      sampleRate: opts.sampleRate,
     });
 
     this.netWorker!.postMessage({
