@@ -4,8 +4,17 @@
  * Upstream `@jtarrio/webrtlsdr` only detects R820T and R828D tuners. The
  * Nooelec NeSDR Smartee XTR (and older NESDR Mini, R820T-era dongles
  * reflashed as E4000, etc.) use the Elonics E4000. This wrapper mirrors
- * `RTL2832U.open()` exactly but adds [[e4000-tuner]] to the detection
- * chain after R828D.
+ * `RTL2832U.open()` and adds [[e4000-tuner]] to the detection chain.
+ *
+ * Detection order matters: we run E4000 *before* R828D because of an
+ * upstream bug in webrtlsdr 3.0.6. `R828D.maybeInit` forgets to `await`
+ * its presence check (`let found = R8xx.check(com, 0x74); if (!found)
+ * return null;`), so `found` is always a truthy Promise, the chip is
+ * always reported as present, and an XTR (E4000 at I²C 0x64, nothing at
+ * 0x74) trips a `setRegBuffer failed block=0x600 reg=74` during
+ * `tuner.open()`. By detecting E4000 first we sidestep the broken probe
+ * on real XTR hardware; the try/catch around R828D below catches the
+ * same broken probe for any other unsupported tuner.
  *
  * Implementation: the upstream `RTL2832U` class has a private constructor
  * and private static helpers (`_init`, `_findTuner`). Both are accessible
@@ -32,6 +41,17 @@ type Rtl2832uPrivate = {
   };
 };
 
+/** Call `R828D.maybeInit` but swallow throws from its missing-await
+ *  presence check. Returns `null` on any failure so the chain can keep
+ *  looking. */
+async function tryR828d(com: RtlCom): Promise<Tuner | null> {
+  try {
+    return await R828D.maybeInit(com);
+  } catch {
+    return null;
+  }
+}
+
 export async function openRtl2832U(device: USBDevice): Promise<RtlDevice> {
   const Cls = RTL2832U as unknown as Rtl2832uPrivate;
   const com = new RtlCom(device);
@@ -39,8 +59,8 @@ export async function openRtl2832U(device: USBDevice): Promise<RtlDevice> {
   await Cls._init(com);
 
   let tuner: Tuner | null = await R820T.maybeInit(com);
-  if (tuner === null) tuner = await R828D.maybeInit(com);
   if (tuner === null) tuner = await E4000.maybeInit(com);
+  if (tuner === null) tuner = await tryR828d(com);
   if (tuner === null) {
     await com.releaseInterface();
     throw new RadioError(
